@@ -3,4 +3,4 @@
 	url = https://github.com/nvpro-samples/nvpro_core.git
 [submodule "nv_cluster_lod_builder"]
 	path = nv_cluster_lod_builder
-	url = https://github.com/nvpro-samples/nv_cluster_lod_builder.git
+	url = https://github.com/pknowles/nv_cluster_lod_builder.git

@@ -1,10 +1,12 @@
 # Streaming and Ray Tracing Continuous Level of Detail
 
-> [!IMPORTANT]
-> This repository has been archived in favor of a similar sample,
-> [vk_lod_clusters](https://github.com/nvpro-samples/vk_lod_clusters), and is no
-> longer maintained by NVIDIA. `vk_lod_clusters` has progressed in features and
-> continues to do so.
+> [!NOTE]
+> This demo is now independently maintained by me, the original NVIDIA
+> developer, forked from [here](https://github.com/NVIDIA-RTX/VKLOD-Sample). I
+> hope you enjoy it or find something useful. Feel free to file issues on
+> GitHub. For reference,
+> [vk_lod_clusters](https://github.com/nvpro-samples/vk_lod_clusters) is a
+> similar Vulkan demo still actively maintained by NVIDIA.
 
 ![preview](doc/clusters.jpg)
 
@@ -12,36 +14,38 @@ This is a Vulkan application that renders large scenes with real time ray
 tracing using NVIDIA RTX Mega Geometry. It streams continuous level of detail
 from disk, like [Nanite's virtual
 geometry](https://dev.epicgames.com/documentation/en-us/unreal-engine/nanite-virtualized-geometry-in-unreal-engine)
-but for ray tracing. To run it, download and [build](#building-and-dependencies)
-from source.
+but for ray tracing. It is
+[RAII](https://www.heuristic42.com/blog/66/raii-the-powerful-implication-of-always-initializing/)
+leaning and shows both Vulkan API usage and some object design ideas to
+facilitate streaming and HW accelerated raytracing. To run it, download and
+[build](#building-and-dependencies) from source.
 
-A series of Mega Geometry and *cluster acceleration structure* dedicated Vulkan
-samples are also available in the
-[nvpro-samples](https://github.com/nvpro-samples) collection, tailored to its
-framework. These other samples exemplify the same technology, but in a different
-flavor of C++:
+A series of NVIDIA RTX Mega Geometry and *cluster acceleration structure*
+samples can be found here:
 
-- [**vk_lod_clusters**](https://github.com/nvpro-samples/vk_lod_clusters)<br/>
-  Similar in goal to this sample, see [unique features](#unique-features), but
-  written in a different C++ coding style, aligned with nvpro-samples. Readers
-  can choose the approach that suits their preference.
+- [vk_lod_clusters](https://github.com/nvpro-samples/vk_lod_clusters) (Similar to this, see [unique features](#unique-features))
 - [vk_animated_clusters](https://github.com/nvpro-samples/vk_animated_clusters)
 - [vk_tessellated_clusters](https://github.com/nvpro-samples/vk_tessellated_clusters)
 - [vk_partitioned_tlas](https://github.com/nvpro-samples/vk_partitioned_tlas)
-
-Other RTX Mega Geometry samples:
-
 - [RTX Mega Geometry](https://github.com/NVIDIA-RTX/RTXMG) (DX12 and Vulkan abstraction)
-- [optix-subd](https://github.com/nvidia/optix-subd) (Optix)
+- [optix-subd](https://github.com/nvidia/optix-subd) (OptiX)
+
+Blog posts and links:
+
+- [NVIDIA RTX Mega Geometry Now Available with New Vulkan Samples](https://developer.nvidia.com/blog/nvidia-rtx-mega-geometry-now-available-with-new-vulkan-samples/)
+- [Fast Ray Tracing of Dynamic Scenes Using NVIDIA OptiX 9 and NVIDIA RTX Mega Geometry](https://developer.nvidia.com/blog/fast-ray-tracing-of-dynamic-scenes-using-nvidia-optix-9-and-nvidia-rtx-mega-geometry/)
+- [UE5 Zorah Mega Geometry Sample Download](https://developer.nvidia.com/rtx-kit?sortBy=developer_learning_library%2Fsort%2Ftitle%3Aasc)
+- [UE5 Bonsai Mega Geometry Sample Instructions](https://dlss.download.nvidia.com/demos/bonsaidiorama/NVIDIA%20RTX%20Bonsai%20Diorama%20-%20Developer%20Guide.pdf)
+- [NVIDIA RTX Branch of Unreal Engine](]https://developer.nvidia.com/game-engines/unreal-engine/rtx-branch) (Includes Mega Geometry integration)
+
+See [References](#references) below for related literature and talks.
 
 ## NVIDIA RTX Mega Geometry
 
-[NVIDIA RTX Mega
-Geometry](https://developer.nvidia.com/blog/nvidia-rtx-mega-geometry-now-available-with-new-vulkan-samples/)
-introduced cluster acceleration structures. Clusters can be thought of as a new
-primitive type that avoids some cost of dealing with individual triangles.
-Cluster acceleration structures fix a problem with previous ray tracing APIs and
-in general unlock dynamic geometry in ray tracing.
+NVIDIA RTX Mega Geometry introduced cluster acceleration structures. Clusters
+can be thought of as a new primitive type that avoids some cost of dealing with
+individual triangles. Cluster acceleration structures fix a problem with
+previous ray tracing APIs and in general unlock dynamic geometry in ray tracing.
 
 This means we can now ray trace:
 
@@ -83,9 +87,9 @@ extension.
 
 1. At launch, a 3D mesh is decimated into clusters in such a way that watertight
    and varying detail can be achieved. For details, see the README for
-   [nv_cluster_lod_builder](https://github.com/nvpro-samples/nv_cluster_lod_builder/)
+   [nv_cluster_lod_builder](https://github.com/pknowles/nv_cluster_lod_builder/)
    or the references below. The clustering is done by a dependent library,
-   [nv_cluster_builder](https://github.com/nvpro-samples/nv_cluster_builder).
+   [nv_cluster_builder](https://github.com/pknowles/nv_cluster_builder).
 2. Clusters are streamed in in groups of clusters and *cluster \[level\] acceleration
    structures* (CLAS) are built in the background.
 3. A compute shader chooses between the available clusters to form one
@@ -300,12 +304,12 @@ This demo is licensed under the [Apache License
 
 This demo uses third-party dependencies, which have their own:
 
-- [nv_cluster_lod_builder](https://github.com/nvpro-samples/nv_cluster_lod_builder), licensed under the 
-[Apache License
-2.0](https://github.com/nvpro-samples/nv_cluster_lod_builder/blob/main/LICENSE)
-- [nv_cluster_builder](https://github.com/nvpro-samples/nv_cluster_builder), licensed under the 
-[Apache License
-2.0](https://github.com/nvpro-samples/nv_cluster_builder/blob/main/LICENSE)
+- [nv_cluster_lod_builder](https://github.com/pknowles/nv_cluster_lod_builder),
+licensed under the [Apache License
+2.0](https://github.com/pknowles/nv_cluster_lod_builder/blob/main/LICENSE)
+- [nv_cluster_builder](https://github.com/pknowles/nv_cluster_builder), licensed
+under the [Apache License
+2.0](https://github.com/pknowles/nv_cluster_builder/blob/main/LICENSE)
 - [meshoptimizer](https://github.com/zeux/meshoptimizer), licensed under the
   [MIT License](https://github.com/zeux/meshoptimizer/blob/47aafa533b439a78b53cd2854c177db61be7e666/LICENSE.md)
 - [decodeless collection](https://github.com/decodeless), licensed under the
@@ -324,3 +328,5 @@ This demo uses third-party dependencies, which have their own:
 - [(2005) Batched Multi Triangulation](https://ieeexplore.ieee.org/document/1532797)
 - [(2021) A Deep Dive into Unreal Engine's 5 Nanite](https://advances.realtimerendering.com/s2021/Karis_Nanite_SIGGRAPH_Advances_2021_final.pdf) ([video](https://www.youtube.com/watch?v=eviSykqSUUw))
 - [(2023) Real-Time Ray Tracing of Micro-Poly Geometry with Hierarchical Level of Detail](https://www.intel.com/content/www/us/en/developer/articles/technical/real-time-ray-tracing-of-micro-poly-geometry.html) ([video](https://www.youtube.com/watch?v=Tx32yi_0ETY))
+- [(2025) Scale Up Ray Tracing in Games With RTX Mega Geometry](https://www.nvidia.com/en-us/on-demand/session/gdc25-gdc1006/)
+- [(2025) Path Tracing Nanite in NVIDIA Zorah](https://www.nvidia.com/en-us/on-demand/session/gdc25-gdc1002/)
