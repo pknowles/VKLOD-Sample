@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,9 +15,11 @@
  * limitations under the License.
  */
 
+#include <fmt/format.h>
 #include <lod_streaming_jobs.hpp>
 #include <lod_streaming_scene.hpp>
 #include <nvh/alignment.hpp>
+#include <nvh/nsightevents.h>
 #include <sample_vulkan_objects.hpp>
 #include <vulkan/vulkan_core.h>
 
@@ -36,6 +38,8 @@ static Result makeLoad(ResourceAllocator* allocator,
                        LoadUnloadBatch&   batch,
                        VkCommandBuffer    cmd)
 {
+  vkobj::ScopedDebugLabel nvtxRange(cmd, "makeLoad");
+
   // Simple out-of-memory case, where we're above a high water mark
   // of 80% memory usage. This saves having to estimate and reserve
   // additional CLAS memory that will be needed to complete the
@@ -45,7 +49,7 @@ static Result makeLoad(ResourceAllocator* allocator,
   // root groups
   if(memoryPool.bytesAllocated() + memoryPool.internalFragmentation() > (memoryPool.size() * 80) / 100)
   {
-    return Result::eSkip;
+    return Result::eDelay;
   }
 
   // Abort if adding this the next job would exceed maxClusters
@@ -105,7 +109,7 @@ BatchWithBuiltCLAS::BatchWithBuiltCLAS(ResourceAllocator* allocator,
 {
 }
 
-StreamingSceneVk::StreamingSceneVk(ResourceAllocator* allocator, SampleGlslCompiler &glslCompiler, VkDeviceSize geometryBufferBytes, VkCommandPool initPool, vkobj::TimelineQueue& initQueue, const Scene& scene, SceneVK& sceneVk, bool requiresClas, uint32_t streamingTransferQueueFamilyIndex, VkQueue streamingTransferQueue)
+StreamingSceneVk::StreamingSceneVk(ResourceAllocator* allocator, SampleGlslCompiler &glslCompiler, VkDeviceSize geometryBufferBytes, uint32_t maxResidentGroups, VkCommandPool initPool, vkobj::TimelineQueue& initQueue, const Scene& scene, SceneVK& sceneVk, bool greedyUnload, bool requiresClas, uint32_t streamingTransferQueueFamilyIndex, VkQueue streamingTransferQueue)
       : m_geometryLoaderContext(allocator->getDevice(), allocator->getPhysicalDevice(), allocator->getMemoryAllocator(), streamingTransferQueueFamilyIndex, streamingTransferQueue)
       , m_maxClustersPerBuild(MaxGroupsPerBuild * scene.counts.maxClustersPerGroup)
       , m_requiresClas(requiresClas)
@@ -131,6 +135,8 @@ StreamingSceneVk::StreamingSceneVk(ResourceAllocator* allocator, SampleGlslCompi
       , m_modifyGroupsProgram(allocator->getDevice(), glslCompiler)
       , m_fillClasInputProgram(allocator->getDevice(), glslCompiler)
       , m_packClasProgram(allocator->getDevice(), glslCompiler)
+      , m_maxResidentGroups(maxResidentGroups)
+      , m_greedyUnload(greedyUnload)
 {
   for(const RequestList& item : m_pipeline0Requests.storage())
     m_staticStagingMemory += item.memoryUsage();
@@ -170,6 +176,7 @@ void StreamingSceneVk::makeRequests(vkobj::Buffer<uint8_t>& groupNeededFlags,
                                     VkCommandBuffer         cmd)
 {
   m_pipeline0Requests.tryProduce([&](streaming::RequestList& requests) {
+    vkobj::ScopedDebugLabel gatherRequestsRange(cmd, "Make Requests");
     requests.gather(m_requestsProgram, groupNeededFlags, promisedSubmitSemaphoreState, cmd);
     m_workCounter.addRequestWork(1);
   });
@@ -190,6 +197,7 @@ void StreamingSceneVk::buildClasBatch(ResourceAllocator* allocator, vkobj::Semap
     return m_pipeline2GeometryCLAS.tryProduce([&](BatchWithBuiltCLAS& out) {
       if(in.totalClusters > 0 && m_requiresClas)
       {
+        vkobj::ScopedDebugLabel buildClasStagingRange(cmd, fmt::format("Build CLAS ({})", in.totalClusters));
         out.clasStaging.buildClas(allocator, m_fillClasInputProgram, m_packClasProgram, in.uploadedMods,
                                   in.loadClusterLoadGroupsHost, in.loadGroupClusterOffsetsHost, in.totalClusters, cmd);
       }
@@ -203,7 +211,7 @@ void StreamingSceneVk::buildClasBatch(ResourceAllocator* allocator, vkobj::Semap
 bool StreamingSceneVk::modifyGroups(ResourceAllocator*            allocator,
                                     const Scene&                  scene,
                                     vkobj::Buffer<shaders::Mesh>& meshPointers,
-                                    std::vector<ClusterGroupVk>&  unloadGarbage,
+                                    std::queue<Garbage>&          unloadGarbage,
                                     vkobj::SemaphoreValue         unloadGarbageSemaphore,
                                     bool                          block,
                                     VkCommandBuffer               cmd,
@@ -218,6 +226,8 @@ bool StreamingSceneVk::modifyGroups(ResourceAllocator*            allocator,
     {
       if(!in.clasBuildDone.wait(m_geometryLoaderContext.device, 0))
         return false;  // This batch is not ready yet. Try again next frame.
+
+      vkobj::ScopedDebugLabel compactClasRange(cmd, "Compact CLAS");
       in.clasStaging.compactClas(allocator, m_memoryPool, in.clasBuildDone, m_packClasProgram, in.batch.uploadedMods,
                                  in.batch.totalClusters, cmd, in.newClases);
       assert(in.batch.newGeomertries.size() == in.newClases.size());
@@ -225,10 +235,17 @@ bool StreamingSceneVk::modifyGroups(ResourceAllocator*            allocator,
 
     // Keep track of streamed allocations until we unload them and move any
     // unloaded allocations into unloadGarbage.
-    loadUnloadGroupAllocations(scene, in.batch, in.newClases, unloadGarbage);
+    {
+      vkobj::NvtxRange                       loadUnloadRange("Load/Unload Group Allocations");
+      std::vector<streaming::ClusterGroupVk> garbageBatch;
+      loadUnloadGroupAllocations(scene, in.batch, in.newClases, garbageBatch);
+      if(!garbageBatch.empty())
+        unloadGarbage.push(Garbage{moveAny(std::move(garbageBatch)), unloadGarbageSemaphore});
+    }
 
     // Insert new geometry and CLAS pointers into the scene state on the GPU and
     // remove unloaded ones.
+    vkobj::ScopedDebugLabel modifyGroupsGpuRange(cmd, "Modify Groups");
     in.batch.groupModsList.modifyGroups(m_modifyGroupsProgram, meshPointers, unloadGarbageSemaphore, cmd,
                                         totalResidentClusters, totalResidentInstanceClusters);
     return true;
@@ -279,7 +296,7 @@ void StreamingSceneVk::flush(ResourceAllocator*            allocator,
       vkobj::ImmediateCommandBuffer cmd(allocator->getDevice(), pool, queue,
                                         VK_PIPELINE_STAGE_2_TRANSFER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT
                                             | VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_NV);
-      std::vector<ClusterGroupVk>   unloadGarbage;
+      std::queue<Garbage>           unloadGarbage;
       vkobj::SemaphoreValue unloadGarbageSemaphore = queue.nextSubmitValue();  // don't reuse GPU buffers until this is signalled
       modifyGroups(allocator, scene, meshPointers, unloadGarbage, unloadGarbageSemaphore, true, cmd,
                    totalResidentClusters, totalResidentInstanceClusters);
@@ -373,6 +390,7 @@ void StreamingSceneVk::geometryLoaderEntrypoint(std::unique_ptr<const Scene> sce
     requestsConsumed = 0;
 
     // Mark any allocated staging buffers for reuse
+    vkobj::NvtxRange nvtxRange("finalizeAndReleaseStaging()");
     VkDeviceSize allocatedSize, usedSize;
     m_geometryLoaderContext.allocator->getStaging()->getUtilization(allocatedSize, usedSize);
     m_geometryLoaderMemory = allocatedSize;
@@ -382,6 +400,8 @@ void StreamingSceneVk::geometryLoaderEntrypoint(std::unique_ptr<const Scene> sce
 
 void StreamingSceneVk::loadGeometryBatch(const Scene& scene, streaming::RequestDependencyPipeline& requests, LoadUnloadBatch& batch)
 {
+  vkobj::NvtxRange nvtxRange("loadGeometryBatch()");
+
   vkobj::BuildingCommandBuffer cmd(m_geometryLoaderContext.device, m_geometryLoaderContext.commandPool,
                                    VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
 
@@ -390,14 +410,35 @@ void StreamingSceneVk::loadGeometryBatch(const Scene& scene, streaming::RequestD
   auto load = [this, &scene, batchPtr = &batch, cmdPtr = &cmd](uint32_t meshIndex, uint32_t groupIndex) -> Result {
     auto& batch = *batchPtr;
     auto& cmd   = *cmdPtr;
-    return makeLoad(m_geometryLoaderContext.allocator, m_memoryPoolBuffer, m_memoryPool, scene, meshIndex, groupIndex,
-                    MaxLoadUnloads, m_maxClustersPerBuild, batch, cmd);
+    if(m_residentGroups >= m_maxResidentGroups)
+      return Result::eDelay;
+    auto result = makeLoad(m_geometryLoaderContext.allocator, m_memoryPoolBuffer, m_memoryPool, scene, meshIndex,
+                           groupIndex, MaxLoadUnloads, m_maxClustersPerBuild, batch, cmd);
+    if(result == Result::eSuccess)
+      ++m_residentGroups;
+    return result;
   };
 
   // Callback for unloading a cluster group.
-  auto unload = [&batch](uint32_t meshIndex, uint32_t groupIndex) -> Result {
+  auto unload = [this, &batch](uint32_t meshIndex, uint32_t groupIndex) -> Result {
     if(batch.unloads.size() + 1 > MaxLoadUnloads)
       return Result::eStopAndRetry;
+
+    // Don't unload unless m_greedyUnload or we actually need to reclaim memory.
+    // In other words, only reclaim until we're below these thresholds if we
+    // don't need the rest right now. Ideally there would be some eviction
+    // priority.
+    // TODO: turn RequestDependencyPipeline::m_topLevelRequests and
+    // m_delayedRequests into priority queues?
+    constexpr VkDeviceSize lowWaterMarkMemoryPct = 60;
+    constexpr uint32_t     lowWaterMarkGroupsPct = 60;
+    VkDeviceSize           allocatedMemory       = m_memoryPool.bytesAllocated() + m_memoryPool.internalFragmentation();
+    if(!m_greedyUnload && m_residentGroups < (m_maxResidentGroups * lowWaterMarkGroupsPct) / 100
+       && allocatedMemory < (m_memoryPool.size() * lowWaterMarkMemoryPct) / 100)
+      return Result::eDelay;
+
+    assert(m_residentGroups > 0);
+    --m_residentGroups;
     batch.unloads.push_back(shaders::UnloadGroup{
         .meshIndex  = meshIndex,
         .groupIndex = groupIndex,
@@ -417,6 +458,9 @@ void StreamingSceneVk::loadGeometryBatch(const Scene& scene, streaming::RequestD
     batch.uploadedMods = batch.groupModsList.write(m_geometryLoaderContext.allocator, batch.loads, batch.unloads,
                                                    scene.meshes, scene.meshInstanceCounts, cmd);
   }
+
+  // Update statistics for the render thread to read
+  m_residentGroupsStat = m_residentGroups;
 
   // Submit and wait for completion. The next consumer is the render thread,
   // to build CLASes. We could pass it a semaphore but we don't want to block

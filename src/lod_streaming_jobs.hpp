@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -108,15 +108,6 @@ private:
   vkobj::ReadyCommandBuffer                   m_pendingGather;  // tmp storage for submitted command buffer
 };
 
-// Moves the given object into a std::shared_ptr. This is necessary to house
-// move-only objects inside an std::any. A nicer implementation would use a
-// move-only version of std::any since shared_ptr is expensive.
-template <class T>
-std::any moveAny(T&& obj)
-{
-  return std::make_shared<std::remove_reference_t<T>>(std::move(obj));
-}
-
 // A reusable GPU buffer of cluster groups to insert in or remove from the
 // renderable data. These are passed in a queue from the streaming thread to the
 // render thread. They will not be added to the queue until ready, so no
@@ -159,7 +150,7 @@ private:
 enum Result : uint32_t
 {
   eSuccess,       // keep loading/unloading
-  eSkip,          // out of memory, skip and hopefully we get an unload
+  eDelay,         // out of memory or no need to unload, delay until later
   eStopAndRetry,  // pipeline full, retry later
 };
 
@@ -212,8 +203,10 @@ private:
   std::vector<bool> m_globalGroupsNeeded;  // Pin top level requests so that an orphaned dependency doesn't unload them
   std::vector<bool> m_globalGroupsLoaded;  // Keep track of what load events have actually been issued
   std::unordered_set<uint32_t> m_batchUnloads;  // Don't reload dependencies if they were unloaded in the same batch
-  std::deque<shaders::GroupRequest> m_topLevelRequests;
-  uint32_t                          m_pendingRequests = 0;
+  std::deque<shaders::GroupRequest>  m_topLevelRequests;
+  std::vector<shaders::GroupRequest> m_delayedRequests;
+  bool                               m_useDelayedRequests = false;
+  uint32_t                           m_pendingRequests    = 0;
 };
 
 }  // namespace streaming

@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -167,24 +167,30 @@ uint div_up(uint n, uint d)
   return (n + d - 1) / d;
 }
 
-float conservativeErrorOverDistance(mat4x3 instanceToEye, float uniformScale, vec4 boundingSphere, float objectSpaceQuadricError)
+float conservativeErrorOverDistance(vec3 cameraInObjectSpace, vec4 boundingSphere, float objectSpaceQuadricError)
 {
-  float sphereDistance = length(instanceToEye * vec4(boundingSphere.xyz, 1.0f));
-  float error          = objectSpaceQuadricError * uniformScale;
-  float errorDistance  = max(error, sphereDistance - boundingSphere.w * uniformScale);
-  return error / errorDistance;
+  float sphereDistance = length(cameraInObjectSpace - boundingSphere.xyz);
+  return objectSpaceQuadricError / max(objectSpaceQuadricError, sphereDistance - boundingSphere.w);
 }
 
-bool traverseChild(mat4x3 instanceToEye, float uniformScale, vec4 boundingSphere, float quadricError)
+bool traverseChild(vec3 cameraInObjectSpace, vec4 boundingSphere, float quadricError)
 {
-  return conservativeErrorOverDistance(instanceToEye, uniformScale, boundingSphere, quadricError)
+  return conservativeErrorOverDistance(cameraInObjectSpace, boundingSphere, quadricError)
          >= pc.traversalParams.errorOverDistanceThreshold;
 }
 
-bool renderCluster(mat4x3 instanceToEye, float uniformScale, vec4 boundingSphere, float quadricError)
+bool renderCluster(vec3 cameraInObjectSpace, vec4 boundingSphere, float quadricError)
 {
-  return conservativeErrorOverDistance(instanceToEye, uniformScale, boundingSphere, quadricError)
+  return conservativeErrorOverDistance(cameraInObjectSpace, boundingSphere, quadricError)
          < pc.traversalParams.errorOverDistanceThreshold;
+}
+
+// For a conservative fallback when e.g. the camera is surrounded by many
+// instances
+float conservativeErrorOverDistanceOmnidirectional(float minCameraInObjectSpaceDistance, vec4 boundingSphere, float objectSpaceQuadricError)
+{
+  float sphereDistance = max(0.0, minCameraInObjectSpaceDistance - length(boundingSphere.xyz));
+  return objectSpaceQuadricError / max(objectSpaceQuadricError, sphereDistance - boundingSphere.w);
 }
 
 #if IS_RASTERIZATION == 0 && TRAVERSE_PER_INSTANCE == 0
@@ -192,11 +198,21 @@ bool renderCluster(mat4x3 instanceToEye, float uniformScale, vec4 boundingSphere
 // Keep traversing while at least one instance needs more detail
 bool traverseChildAny(MeshInstances meshInstances, vec4 boundingSphere, float quadricError)
 {
-  for(uint32_t i = 0; i < TRAVERSAL_NEAREST_INSTANCE_COUNT && meshInstances.enabled[i] != 0; ++i)
+  for(uint32_t i = 0; i < meshInstances.instanceCount && i < TRAVERSAL_NEAREST_INSTANCE_COUNT; ++i)
   {
-    float instanceStreamPriority;
-    if(traverseChild(meshInstances.instanceToEye[i], meshInstances.uniformScale[i], boundingSphere, quadricError))
-      return true;
+#if TRAVERSAL_CONSERVATIVE_FALLBACK
+    if(meshInstances.lastInstanceIsRadius != 0 && i == meshInstances.instanceCount - 1)
+    {
+      if(conservativeErrorOverDistanceOmnidirectional(meshInstances.camerasInObjectSpace[i].x, boundingSphere, quadricError)
+         >= pc.traversalParams.errorOverDistanceThreshold)
+        return true;
+    }
+    else
+#endif
+    {
+      if(traverseChild(meshInstances.camerasInObjectSpace[i], boundingSphere, quadricError))
+        return true;
+    }
   }
   return false;
 }
@@ -207,10 +223,21 @@ bool renderClusterAll(MeshInstances meshInstances, vec4 boundingSphere, float qu
 {
   bool anyEnabled = false;
   bool result     = true;
-  for(uint32_t i = 0; i < TRAVERSAL_NEAREST_INSTANCE_COUNT && meshInstances.enabled[i] != 0; ++i)
+  for(uint32_t i = 0; i < meshInstances.instanceCount && i < TRAVERSAL_NEAREST_INSTANCE_COUNT; ++i)
   {
     anyEnabled = true;
-    result = result && renderCluster(meshInstances.instanceToEye[i], meshInstances.uniformScale[i], boundingSphere, quadricError);
+#if TRAVERSAL_CONSERVATIVE_FALLBACK
+    if(meshInstances.lastInstanceIsRadius != 0 && i == meshInstances.instanceCount - 1)
+    {
+      result = result
+               && conservativeErrorOverDistanceOmnidirectional(meshInstances.camerasInObjectSpace[i].x, boundingSphere, quadricError)
+                      < pc.traversalParams.errorOverDistanceThreshold;
+    }
+    else
+#endif
+    {
+      result = result && renderCluster(meshInstances.camerasInObjectSpace[i], boundingSphere, quadricError);
+    }
   }
   return anyEnabled && result;
 }
@@ -324,13 +351,13 @@ void main()
         isClusterNode           = decodeChildren(node.childrenOrClusters).clusterNode != 0;
         vec4 nodeBoundingSphere = vec4(node.bsx, node.bsy, node.bsz, node.bsw);
 #if IS_RASTERIZATION
-        mat4 instanceToEye = pc.traversalParams.viewTransform * instance.transform;
+        vec3 camerasInObjectSpace = vec3(instance.transformInv * vec4(pc.traversalParams.viewPosition, 1.0));
         visitNode          = wasVisible(instance.transform, nodeBoundingSphere)
-                    && traverseChild(mat4x3(instanceToEye), instance.uniformScale, nodeBoundingSphere,
+                    && traverseChild(camerasInObjectSpace, nodeBoundingSphere,
                                      node.maxClusterQuadricError);
 #elif TRAVERSE_PER_INSTANCE
-        mat4 instanceToEye = pc.traversalParams.viewTransform * instance.transform;
-        visitNode = traverseChild(mat4x3(instanceToEye), instance.uniformScale, nodeBoundingSphere,
+        vec3 camerasInObjectSpace = vec3(instance.transformInv * vec4(pc.traversalParams.viewPosition, 1.0));
+        visitNode = traverseChild(camerasInObjectSpace, nodeBoundingSphere,
                                   node.maxClusterQuadricError);
 #else
         MeshInstancesArray meshInstances = MeshInstancesArray(pc.meshInstances);
@@ -387,8 +414,9 @@ void main()
     // 'running' variable.
     if(gl_LocalInvocationID.x == 0)
     {
-      // atomicAdd() above may have returned this value
-      running = canary-- > 0 && jobStatus.array[0].remaining > 0;
+      // Use atomicAdd() as an atomicLoad() to force a re-read of the remaining
+      // jobs
+      running = canary-- > 0 && atomicAdd(jobStatus.array[0].remaining, 0) > 0;
     }
 
     // Sync with the intention of flushing remaining.fetch_add() before
@@ -501,13 +529,13 @@ void main()
           vec4       generatingGroupBoundingSphere = groupBoundingSpheres.array[generatingGroupIndex];
 
 #if IS_RASTERIZATION
-          mat4 instanceToEye = pc.traversalParams.viewTransform * instance.transform;
+          vec3 camerasInObjectSpace = vec3(instance.transformInv * vec4(pc.traversalParams.viewPosition, 1.0));
           appendClas         = wasVisible(instance.transform, generatingGroupBoundingSphere)
-                       && renderCluster(mat4x3(instanceToEye), instance.uniformScale,
+                       && renderCluster(camerasInObjectSpace,
                                         generatingGroupBoundingSphere, generatingGroupQuadricError);
 #elif TRAVERSE_PER_INSTANCE
-          mat4 instanceToEye = pc.traversalParams.viewTransform * instance.transform;
-          appendClas         = renderCluster(mat4x3(instanceToEye), instance.uniformScale,
+          vec3 camerasInObjectSpace = vec3(instance.transformInv * vec4(pc.traversalParams.viewPosition, 1.0));
+          appendClas         = renderCluster(camerasInObjectSpace,
                                              generatingGroupBoundingSphere, generatingGroupQuadricError);
 #else
           MeshInstancesArray meshInstances = MeshInstancesArray(pc.meshInstances);
@@ -534,11 +562,37 @@ void main()
             drawClusters.array[clusterWriteIndex] = dc;
           }
 #else
-          Uint64Array            clusterAccelerationStructures = Uint64Array(group.clasAddressesAddress);
+
+          Uint64Array clusterAccelerationStructures = Uint64Array(group.clasAddressesAddress);
+          uint64_t    clusterAddress                = clusterAccelerationStructures.array[clusterIndex];
+#if TRAVERSE_PER_INSTANCE
+          SelectedClusterArray selectedClusters          = SelectedClusterArray(pc.selectedClusters);
+          uint32_t             offset                    = atomicAdd(jobStatus.array[0].selectedClusterAlloc, 1);
+          if(offset < pc.maxSelectedClusters)
+          {
+            selectedClusters.array[offset] = SelectedCluster(uint32_t(clusterJob.objectIndex), clusterAddress);
+
+            ClusterBLASInfoNVArray blasInput = ClusterBLASInfoNVArray(pc.blasInputAddress);
+            atomicAdd(blasInput.array[uint32_t(clusterJob.objectIndex)].clusterReferencesCount, 1);  // count per-instance clusters for allocation in traverse_verify.comp.glsl
+          }
+#else
           ClusterBLASInfoNVArray blasInput                     = ClusterBLASInfoNVArray(pc.blasInputAddress);
           MutUint64Array blasInputClusters = MutUint64Array(blasInput.array[uint32_t(clusterJob.objectIndex)].clusterReferences);
           uint blasWriteIndex = atomicAdd(blasInput.array[uint32_t(clusterJob.objectIndex)].clusterReferencesCount, 1);
-          blasInputClusters.array[blasWriteIndex] = clusterAccelerationStructures.array[clusterIndex];
+          blasInputClusters.array[blasWriteIndex] = clusterAddress;
+#endif
+
+#if 1
+          // Compute triangle count just for overlaying stats (unnecessary overhead)
+          TraverseStatsRef     traverseStats     = TraverseStatsRef(pc.traverseStatsAddress);
+          ClusterGeometryArray clusterGeometries = ClusterGeometryArray(group.clusterGeometryAddressesAddress);
+          ClusterGeometry      clusterGeometry   = clusterGeometries.array[clusterIndex];
+#if TRAVERSE_PER_INSTANCE
+          atomicAdd(traverseStats.d.triangleCount, uint(clusterGeometry.triangleCount));
+#else
+          atomicAdd(traverseStats.d.triangleCount, uint(clusterGeometry.triangleCount * mesh.instanceCount));
+#endif
+#endif
 #endif
         }
       }

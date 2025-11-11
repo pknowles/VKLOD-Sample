@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -17,8 +17,35 @@
 
 #include <cstddef>
 #include <lod_traverser.hpp>
+#include <nvvk/profiler_vk.hpp>
+#include <optional>
 #include <sample_vulkan_objects.hpp>
 #include <scene.hpp>
+
+// Utility to handle a null profiler for traverser initialization. Would use
+// std::optional, but nvvk::ProfilerVK::Section is not move safe.
+struct OptionalSection
+{
+public:
+  [[nodiscard]] OptionalSection(nvvk::ProfilerVK* profiler, const char* name, VkCommandBuffer cmd)
+      : m_id(profiler ? profiler->beginSection(name, cmd, false, false) : 0)
+      , m_cmd(cmd)
+      , m_profiler(profiler)
+  {
+  }
+  ~OptionalSection()
+  {
+    if(m_profiler)
+      m_profiler->endSection(m_id, m_cmd);
+  }
+  OptionalSection(const OptionalSection& other)            = delete;
+  OptionalSection& operator=(const OptionalSection& other) = delete;
+
+private:
+  nvvk::ProfilerVK::SectionID m_id       = {};
+  VkCommandBuffer             m_cmd      = VK_NULL_HANDLE;
+  nvvk::ProfilerVK*           m_profiler = nullptr;
+};
 
 // Type conversion and column major (glm) to row major (vk)
 inline VkTransformMatrixKHR makeVulkanMatrix(const glm::mat4& m)
@@ -26,28 +53,6 @@ inline VkTransformMatrixKHR makeVulkanMatrix(const glm::mat4& m)
   return {{{m[0][0], m[1][0], m[2][0], m[3][0]},  //
            {m[0][1], m[1][1], m[2][1], m[3][1]},  //
            {m[0][2], m[1][2], m[2][2], m[3][2]}}};
-}
-
-inline uint32_t maxClustersPerMesh(const Scene& scene)
-{
-  uint32_t result = 0;
-#if 1
-  // Comupte the max. clusters for just LOD0 (highest detail). Technically more
-  // clusters could be rendered if we got really unlucky with mesh decimation
-  // and re-grouping.
-  for(auto& mesh : scene.meshes)
-  {
-    uint32_t lod0ClusterCount = 0;
-    for(size_t groupIndex : indices(mesh.lodLevelGroups[0]))
-    {
-      lod0ClusterCount += mesh.groupClusterRanges[groupIndex].count;
-    }
-    result = std::max(result, lod0ClusterCount);
-  }
-#else
-  result = scene.counts.maxClustersPerMesh;
-#endif
-  return result;
 }
 
 inline vkobj::Buffer<VkAccelerationStructureInstanceKHR> createDeviceInstances(ResourceAllocator* allocator,
@@ -92,13 +97,30 @@ LodInstanceTraverser::LodInstanceTraverser(ResourceAllocator*        allocator,
                                            VkQueue                   initQueue,
                                            [[maybe_unused]] uint32_t initQueueFamilyIndex,
                                            const Scene&              scene,
-                                           const SceneVK&            sceneVk)
+                                           const SceneVK&            sceneVk,
+                                           uint32_t                  maxTotalClusterGroups)
     : m_traversalConstants(allocator, 1, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
     , m_uboDescriptorSet(allocator->getDevice(),
                          VK_SHADER_STAGE_COMPUTE_BIT,
                          {{shaders::BTraversalConstants, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
                            VkDescriptorBufferInfo{m_traversalConstants, 0, VK_WHOLE_SIZE}}})
-    , m_blas(allocator, scene.counts.totalInstances, maxClustersPerMesh(scene), uint32_t((sceneVk.totalResidentInstanceClusters * 3) / 2))
+    , m_clusterQueue(vkobj::Buffer<shaders::EncodedClusterJob>(
+          allocator,
+          maxTotalClusterGroups * scene.counts.maxClustersPerGroup * 2 /* typically we'll traverse twice as many clusters as are selected */,
+          VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
+    , m_blas(allocator,
+             scene.counts.totalInstances,
+             scene.counts.maxLod0ClustersPerMesh,
+             maxTotalClusterGroups * scene.counts.maxClustersPerGroup)
+    , m_selectedClusters(allocator,
+                         maxTotalClusterGroups * scene.counts.maxClustersPerGroup,
+                         VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+    , m_writeSelectedClustersDispatchIndirect(allocator,
+                                              1,
+                                              VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                              VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
     , m_tlasInfos(createDeviceInstances(allocator, initPool, initQueue, scene))
 {
   // Allocate only the node queue and job status buffer. The Cluster queue is
@@ -112,6 +134,7 @@ LodInstanceTraverser::LodInstanceTraverser(ResourceAllocator*        allocator,
   {
     vkobj::ImmediateCommandBuffer initCmd(allocator->getDevice(), initPool, initQueue);
     vkCmdFillBuffer(initCmd, m_nodeQueue, 0, m_nodeQueue.size_bytes(), 0);
+    vkCmdFillBuffer(initCmd, m_clusterQueue, 0, m_clusterQueue.size_bytes(), 0);
   }
 
   VkDevice device = allocator->getDevice();
@@ -135,6 +158,17 @@ LodInstanceTraverser::LodInstanceTraverser(ResourceAllocator*        allocator,
   m_traverseVerifyPipeline =
       vkobj::SimpleComputePipeline(device, glslCompiler, "traverse_verify.comp.glsl", m_uboDescriptorSet.layout(), &options);
 
+  // Single-thread launch to write selectedClusterAlloc to the DispatchIndirect
+  // buffer. This could almost be done in traverse_verify.comp.glsl if it
+  // weren't for it possibly writting more selected clusters to handle empty
+  // traversal output (e.g. in case of out of memory).
+  m_writeIndirectSizePipeline = vkobj::SimpleComputePipeline(device, glslCompiler, "traverse_write_indirect_size.comp.glsl",
+                                                             m_uboDescriptorSet.layout(), &options);
+
+  // Compute shader to write the selected clusters to their individual BLAS input lists
+  m_writeSelectedClustersPipeline = vkobj::SimpleComputePipeline(device, glslCompiler, "traverse_write_selected_clusters.comp.glsl",
+                                                                 m_uboDescriptorSet.layout(), &options);
+
   // Perform an initial traversal of the scene. The output is needed to build
   // the initial TLAS before an update command buffer can be recorded.
   {
@@ -142,7 +176,7 @@ LodInstanceTraverser::LodInstanceTraverser(ResourceAllocator*        allocator,
     shaders::TraversalParams      traversalParams = initialTraversalParams();
     memoryBarrier(cmd, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-    std::ignore = traverse(allocator, traversalParams, sceneVk, m_blas.input(), m_blas.inputPointers(), cmd);
+    traverse(allocator, traversalParams, sceneVk, m_blas.input(), m_blas.inputPointers(), nullptr, {}, cmd);
   }
 
 #if !defined(NDEBUG)
@@ -167,80 +201,66 @@ LodInstanceTraverser::LodInstanceTraverser(ResourceAllocator*        allocator,
   }
 }
 
-OldTraverseAndBVHBuffers LodInstanceTraverser::traverseAndBuildBVH(ResourceAllocator*              allocator,
-                                                                   const shaders::TraversalParams& traversalParams,
-                                                                   const SceneVK&                  sceneVk,
-                                                                   nvvk::ProfilerVK&               profiler,
-                                                                   VkCommandBuffer                 cmd)
+void LodInstanceTraverser::traverseAndBuildBVH(ResourceAllocator*              allocator,
+                                               const shaders::TraversalParams& traversalParams,
+                                               const SceneVK&                  sceneVk,
+                                               nvvk::ProfilerVK&               profiler,
+                                               vkobj::SemaphoreValue&&         submitSemaphore,
+                                               VkCommandBuffer                 cmd)
 {
-  bool                     needTlasRebuild = false;
-  OldTraverseAndBVHBuffers garbage;
-  if(sceneVk.totalResidentInstanceClusters < m_blas.inputPointers().size() / 3
-     || sceneVk.totalResidentInstanceClusters > m_blas.inputPointers().size())
-  {
-    // Reallocate BLAS
-    garbage.blasBuffers = m_blas.resize(allocator, uint32_t((sceneVk.totalResidentInstanceClusters * 3) / 2));
-    needTlasRebuild     = true;
-  }
-
   {
     nvvk::ProfilerVK::Section sec = profiler.timeRecurring("Traverse Scene LOD", cmd);
-    garbage.clusterQueue = traverse(allocator, traversalParams, sceneVk, m_blas.input(), m_blas.inputPointers(), cmd);
+    traverse(allocator, traversalParams, sceneVk, m_blas.input(), m_blas.inputPointers(), &profiler,
+             vkobj::SemaphoreValue{submitSemaphore}, cmd);
   }
 
   {
     nvvk::ProfilerVK::Section sec = profiler.timeRecurring("Build BVH", cmd);
+    // The BLAS build can write directly into the TLAS input as there is a BLAS per instance
     m_blas.cmdBuild(cmd, m_tlasInfos);
-    m_tlas->cmdUpdate(m_tlasInfos, cmd, needTlasRebuild);
+    m_tlas->cmdUpdate(m_tlasInfos, cmd, false);
   }
-  return garbage;
 }
 
-OldTraverseBuffers LodInstanceTraverser::traverse(ResourceAllocator*              allocator,
-                                                  const shaders::TraversalParams& traversalParams,
-                                                  const SceneVK&                  sceneVk,
-                                                  const vkobj::Buffer<VkClusterAccelerationStructureBuildClustersBottomLevelInfoNV>& blasInput,
-                                                  const vkobj::Buffer<VkDeviceAddress>& blasInputClusters,
-                                                  VkCommandBuffer                       cmd)
+void LodInstanceTraverser::traverse(ResourceAllocator*              allocator,
+                                    const shaders::TraversalParams& traversalParams,
+                                    const SceneVK&                  sceneVk,
+                                    const vkobj::Buffer<VkClusterAccelerationStructureBuildClustersBottomLevelInfoNV>& blasInput,
+                                    const vkobj::Buffer<VkDeviceAddress>& blasInputClusters,
+                                    nvvk::ProfilerVK*                     profiler,
+                                    vkobj::SemaphoreValue&&               submitSemaphore,
+                                    VkCommandBuffer                       cmd)
 {
-  OldTraverseBuffers garbage;
-  if(!m_clusterQueue || sceneVk.totalResidentInstanceClusters < m_clusterQueue.size() / 3
-     || sceneVk.totalResidentInstanceClusters > m_clusterQueue.size())
-  {
-    // TODO: combine with BLAS reallocation above
-    size_t newClusterQueueSize = (sceneVk.totalResidentInstanceClusters * 3) / 2;
-    LOGI("Reallocating traversal cluster queue: %zu\n", newClusterQueueSize);
-    garbage.clusterQueue = std::move(m_clusterQueue);
-    m_clusterQueue       = vkobj::Buffer<shaders::EncodedClusterJob>(allocator, newClusterQueueSize,
-                                                                     VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                                                                     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    vkCmdFillBuffer(cmd, m_clusterQueue, 0, m_clusterQueue.size_bytes(), 0);
-  }
-
   // Zero the job queue
   shaders::JobStatus initJobStatus{};
   vkCmdUpdateBuffer(cmd, m_jobStatus, 0, sizeof(shaders::JobStatus), &initJobStatus);
 
-  assert(sceneVk.totalResidentClusters <= blasInputClusters.size());
+  auto statsBuffer = m_stats.getFreeBuffer(allocator);
+  vkCmdFillBuffer(cmd, statsBuffer.deviceBuffer(), 0, statsBuffer.deviceBuffer().size_bytes(), 0);
+
   assert(sceneVk.clusteredMeshes.size() <= blasInput.size());
   shaders::TraversalConstants traversalConstants{
-      .traversalParams              = traversalParams,
-      .meshesAddress                = sceneVk.meshPointers.address(),
-      .instancesAddress             = sceneVk.instances.address(),
-      .nodeQueueAddress             = m_nodeQueue.address(),
-      .clusterQueueAddress          = m_clusterQueue.address(),
-      .jobStatusAddress             = m_jobStatus.address(),
-      .blasInputAddress             = deviceReinterpretCast<shaders::ClusterBLASInfoNV>(blasInput.address()),
-      .blasInputClustersAddress     = blasInputClusters.address(),
-      .drawClustersAddress          = vkobj::DeviceAddress<shaders::DrawCluster>(0),
-      .drawMeshTasksIndirectAddress = vkobj::DeviceAddress<shaders::DrawMeshTasksIndirect>(0),
-      .drawStatsAddress             = vkobj::DeviceAddress<shaders::DrawStats>(0),
-      .meshInstances                = vkobj::DeviceAddress<shaders::MeshInstances>(0),
-      .sortingMeshInstances         = vkobj::DeviceAddress<shaders::SortingMeshInstances>(0),
-      .nodeQueueSize                = uint32_t(m_nodeQueue.size()),
-      .clusterQueueSize             = uint32_t(m_clusterQueue.size()),
-      .itemsSize                    = uint32_t(sceneVk.instances.size()),  // traverse per-instance
-      .drawClustersSize             = 0,
+      .traversalParams                       = traversalParams,
+      .meshesAddress                         = sceneVk.meshPointers.address(),
+      .instancesAddress                      = sceneVk.instances.address(),
+      .nodeQueueAddress                      = m_nodeQueue.address(),
+      .clusterQueueAddress                   = m_clusterQueue.address(),
+      .jobStatusAddress                      = m_jobStatus.address(),
+      .traverseStatsAddress                  = statsBuffer.deviceBuffer().address(),
+      .blasInputAddress                      = deviceReinterpretCast<shaders::ClusterBLASInfoNV>(blasInput.address()),
+      .blasInputClustersAddress              = blasInputClusters.address(),
+      .drawClustersAddress                   = vkobj::DeviceAddress<shaders::DrawCluster>(0),
+      .drawMeshTasksIndirectAddress          = vkobj::DeviceAddress<shaders::DrawMeshTasksIndirect>(0),
+      .drawStatsAddress                      = vkobj::DeviceAddress<shaders::DrawStats>(0),
+      .meshInstances                         = vkobj::DeviceAddress<shaders::MeshInstances>(0),
+      .sortingMeshInstances                  = vkobj::DeviceAddress<shaders::SortingMeshInstances>(0),
+      .selectedClusters                      = m_selectedClusters.address(),
+      .writeSelectedClustersDispatchIndirect = m_writeSelectedClustersDispatchIndirect.address(),
+      .maxSelectedClusters                   = uint32_t(m_blas.maxTotalClusters()),
+      .nodeQueueSize                         = uint32_t(m_nodeQueue.size()),
+      .clusterQueueSize                      = uint32_t(m_clusterQueue.size()),
+      .itemsSize                             = uint32_t(sceneVk.instances.size()),  // traverse per-instance
+      .drawClustersSize                      = 0,
   };
 
   // Common to all shaders
@@ -256,7 +276,10 @@ OldTraverseBuffers LodInstanceTraverser::traverse(ResourceAllocator*            
 
   // Run: traverse init
   vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_traverseInitPipeline);
-  vkCmdDispatch(cmd, div_ceil(uint32_t(sceneVk.instances.size()), uint32_t(TRAVERSAL_WORKGROUP_SIZE)), 1, 1);
+  {
+    OptionalSection sec(profiler, "Traverse Init", cmd);
+    vkCmdDispatch(cmd, div_ceil(uint32_t(sceneVk.instances.size()), uint32_t(TRAVERSAL_WORKGROUP_SIZE)), 1, 1);
+  }
 
   // Barrier: traverse init -> traverse
   memoryBarrier(cmd, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
@@ -264,7 +287,10 @@ OldTraverseBuffers LodInstanceTraverser::traverse(ResourceAllocator*            
 
   // Run: traverse
   vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_traversePipeline);
-  vkCmdDispatch(cmd, div_ceil(4096u, uint32_t(TRAVERSAL_WORKGROUP_SIZE)), 1, 1);
+  {
+    OptionalSection sec(profiler, "Traverse Main", cmd);
+    vkCmdDispatch(cmd, div_ceil(4096u, uint32_t(TRAVERSAL_WORKGROUP_SIZE)), 1, 1);
+  }
 
   // Barrier: traverse -> traverse verify
   memoryBarrier(cmd, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
@@ -272,12 +298,32 @@ OldTraverseBuffers LodInstanceTraverser::traverse(ResourceAllocator*            
 
   // Run: traverse verify
   vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_traverseVerifyPipeline);
-  vkCmdDispatch(cmd, div_ceil(uint32_t(sceneVk.instances.size()), uint32_t(TRAVERSAL_WORKGROUP_SIZE)), 1, 1);
+  {
+    OptionalSection sec(profiler, "Traverse Verify", cmd);
+    vkCmdDispatch(cmd, div_ceil(uint32_t(sceneVk.instances.size()), uint32_t(TRAVERSAL_WORKGROUP_SIZE)), 1, 1);
+  }
 
-  // Barrier: traverse verify -> BLAS build
+  // Barrier: traverse verify -> write selected clusters
+  memoryBarrier(cmd, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+
+  // Run: write selected clusters, plus computing the indirect launch size
+  {
+    OptionalSection sec(profiler, "Write Selected Clusters", cmd);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_writeIndirectSizePipeline);
+    vkCmdDispatch(cmd, 1, 1, 1);
+    memoryBarrier(cmd, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_INDIRECT_COMMAND_READ_BIT,
+                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_writeSelectedClustersPipeline);
+    vkCmdDispatchIndirect(cmd, m_writeSelectedClustersDispatchIndirect, 0);
+  }
+
+  // Barrier: write selected clusters -> BLAS build
   memoryBarrier(cmd, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR);
-  return garbage;
+
+  statsBuffer.copyToHost(submitSemaphore, cmd);
+  m_stats.queueBuffer(std::move(statsBuffer));
 }
 
 LodMeshTraverser::LodMeshTraverser(ResourceAllocator*        allocator,
@@ -286,12 +332,17 @@ LodMeshTraverser::LodMeshTraverser(ResourceAllocator*        allocator,
                                    VkQueue                   initQueue,
                                    [[maybe_unused]] uint32_t initQueueFamilyIndex,
                                    const Scene&              scene,
-                                   const SceneVK&            sceneVk)
+                                   const SceneVK&            sceneVk,
+                                   uint32_t                  maxTotalClusterGroups)
     : m_traversalConstants(allocator, 1, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
     , m_uboDescriptorSet(allocator->getDevice(),
                          VK_SHADER_STAGE_COMPUTE_BIT,
                          {{shaders::BTraversalConstants, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
                            VkDescriptorBufferInfo{m_traversalConstants, 0, VK_WHOLE_SIZE}}})
+    , m_clusterQueue(vkobj::Buffer<shaders::EncodedClusterJob>(allocator,
+                                                               maxTotalClusterGroups * scene.counts.maxClustersPerGroup,
+                                                               VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
     , m_meshInstances(allocator,
                       scene.counts.totalMeshes,
                       VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
@@ -305,7 +356,10 @@ LodMeshTraverser::LodMeshTraverser(ResourceAllocator*        allocator,
                       VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
                           | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
                       VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
-    , m_blas(allocator, scene.counts.totalMeshes, maxClustersPerMesh(scene), uint32_t((sceneVk.totalResidentClusters * 3) / 2))
+    , m_blas(allocator,
+             scene.counts.totalMeshes,
+             scene.counts.maxLod0ClustersPerMesh,
+             maxTotalClusterGroups * scene.counts.maxClustersPerGroup)
     , m_tlasInfos(createDeviceInstances(allocator, initPool, initQueue, scene))
 {
   shaderc::CompileOptions options = glslCompiler.defaultOptions();
@@ -334,9 +388,16 @@ LodMeshTraverser::LodMeshTraverser(ResourceAllocator*        allocator,
   m_instanceWriter = vkobj::SimpleComputePipeline<shaders::WriteInstancesConstant>(allocator->getDevice(), glslCompiler,
                                                                                    "write_instances.comp.glsl", &options);
 
+  // TODO: move this computation to SceneCounts
+  size_t totalNodes = 0;
+  for(auto& mesh : scene.meshes)
+  {
+    totalNodes += mesh.hierarchy.nodes.size();
+  }
+
   // Allocate only the node queue and job status buffer. The Cluster queue is
   // allocated just before use.
-  m_nodeQueue = vkobj::Buffer<shaders::EncodedNodeJob>(allocator, scene.counts.maxTotalInstanceNodes,
+  m_nodeQueue = vkobj::Buffer<shaders::EncodedNodeJob>(allocator, totalNodes,
                                                        VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                                                        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
   m_jobStatus = vkobj::Buffer<shaders::JobStatus>(allocator, 1, VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
@@ -345,6 +406,7 @@ LodMeshTraverser::LodMeshTraverser(ResourceAllocator*        allocator,
   {
     vkobj::ImmediateCommandBuffer initCmd(allocator->getDevice(), initPool, initQueue);
     vkCmdFillBuffer(initCmd, m_nodeQueue, 0, m_nodeQueue.size_bytes(), 0);
+    vkCmdFillBuffer(initCmd, m_clusterQueue, 0, m_clusterQueue.size_bytes(), 0);
   }
 
   // Perform an initial traversal of the scene. The output is needed to build
@@ -354,7 +416,7 @@ LodMeshTraverser::LodMeshTraverser(ResourceAllocator*        allocator,
     shaders::TraversalParams      traversalParams = initialTraversalParams();
     memoryBarrier(cmd, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-    std::ignore = traverse(allocator, traversalParams, sceneVk, m_blas.input(), m_blas.inputPointers(), cmd);
+    traverse(allocator, traversalParams, sceneVk, m_blas.input(), m_blas.inputPointers(), nullptr, {}, cmd);
   }
 
 #if !defined(NDEBUG)
@@ -390,31 +452,26 @@ LodMeshTraverser::LodMeshTraverser(ResourceAllocator*        allocator,
   }
 }
 
-OldTraverseAndBVHBuffers LodMeshTraverser::traverseAndBuildBVH(ResourceAllocator*              allocator,
-                                                               const shaders::TraversalParams& traversalParams,
-                                                               const SceneVK&                  sceneVk,
-                                                               nvvk::ProfilerVK&               profiler,
-                                                               VkCommandBuffer                 cmd)
+void LodMeshTraverser::traverseAndBuildBVH(ResourceAllocator*              allocator,
+                                           const shaders::TraversalParams& traversalParams,
+                                           const SceneVK&                  sceneVk,
+                                           nvvk::ProfilerVK&               profiler,
+                                           vkobj::SemaphoreValue&&         submitSemaphore,
+                                           VkCommandBuffer                 cmd)
 {
-  bool                     needTlasRebuild = false;
-  OldTraverseAndBVHBuffers garbage;
-  if(sceneVk.totalResidentClusters < m_blas.inputPointers().size() / 3
-     || sceneVk.totalResidentClusters > m_blas.inputPointers().size())
-  {
-    // Reallocate BLAS
-    garbage.blasBuffers = m_blas.resize(allocator, uint32_t((sceneVk.totalResidentClusters * 3) / 2));
-    needTlasRebuild     = true;
-  }
-
   {
     nvvk::ProfilerVK::Section sec = profiler.timeRecurring("Traverse Scene LOD", cmd);
-    garbage.clusterQueue = traverse(allocator, traversalParams, sceneVk, m_blas.input(), m_blas.inputPointers(), cmd);
+    traverse(allocator, traversalParams, sceneVk, m_blas.input(), m_blas.inputPointers(), &profiler,
+             vkobj::SemaphoreValue{submitSemaphore}, cmd);
   }
 
   {
-    nvvk::ProfilerVK::Section sec = profiler.timeRecurring("Build BVH", cmd);
+    nvvk::ProfilerVK::Section outerSec = profiler.timeRecurring("Build BVH", cmd);
     // BLAS build
-    m_blas.cmdBuild(cmd, m_blasAddresses);
+    {
+      nvvk::ProfilerVK::Section sec = profiler.timeRecurring("BLAS", cmd);
+      m_blas.cmdBuild(cmd, m_blasAddresses);
+    }
 
     // BLAS build -> write instances
     memoryBarrier(cmd, VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR, VK_ACCESS_SHADER_READ_BIT,
@@ -429,45 +486,41 @@ OldTraverseAndBVHBuffers LodMeshTraverser::traverseAndBuildBVH(ResourceAllocator
     };
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_instanceWriter);
     vkCmdPushConstants(cmd, m_instanceWriter.pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(constant), &constant);
-    vkCmdDispatch(cmd, div_ceil(uint32_t(m_tlasInfos.size()), uint32_t(TRAVERSAL_WORKGROUP_SIZE)), 1, 1);
+    {
+      nvvk::ProfilerVK::Section sec = profiler.timeRecurring("Write Instances", cmd);
+      vkCmdDispatch(cmd, div_ceil(uint32_t(m_tlasInfos.size()), uint32_t(TRAVERSAL_WORKGROUP_SIZE)), 1, 1);
+    }
 
     // write instances -> TLAS build
     memoryBarrier(cmd, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR,
                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR);
 
     // TLAS build
-    m_tlas->cmdUpdate(m_tlasInfos, cmd, needTlasRebuild);
+    {
+      nvvk::ProfilerVK::Section sec = profiler.timeRecurring("TLAS", cmd);
+      m_tlas->cmdUpdate(m_tlasInfos, cmd, false);
+    }
   }
-  return garbage;
 }
 
-OldTraverseBuffers LodMeshTraverser::traverse(ResourceAllocator*              allocator,
-                                              const shaders::TraversalParams& traversalParams,
-                                              const SceneVK&                  sceneVk,
-                                              const vkobj::Buffer<VkClusterAccelerationStructureBuildClustersBottomLevelInfoNV>& blasInput,
-                                              const vkobj::Buffer<VkDeviceAddress>& blasInputClusters,
-                                              VkCommandBuffer                       cmd)
+void LodMeshTraverser::traverse(ResourceAllocator*              allocator,
+                                const shaders::TraversalParams& traversalParams,
+                                const SceneVK&                  sceneVk,
+                                const vkobj::Buffer<VkClusterAccelerationStructureBuildClustersBottomLevelInfoNV>& blasInput,
+                                const vkobj::Buffer<VkDeviceAddress>& blasInputClusters,
+                                nvvk::ProfilerVK*                     profiler,
+                                vkobj::SemaphoreValue&&               submitSemaphore,
+                                VkCommandBuffer                       cmd)
 {
-  OldTraverseBuffers garbage;
-  if(!m_clusterQueue || sceneVk.totalResidentClusters < m_clusterQueue.size() / 3
-     || sceneVk.totalResidentClusters > m_clusterQueue.size())
-  {
-    // TODO: combine with BLAS reallocation above
-    size_t newClusterQueueSize = (sceneVk.totalResidentClusters * 3) / 2;
-    LOGI("Reallocating traversal cluster queue: %zu\n", newClusterQueueSize);
-    garbage.clusterQueue = std::move(m_clusterQueue);
-    m_clusterQueue       = vkobj::Buffer<shaders::EncodedClusterJob>(allocator, newClusterQueueSize,
-                                                                     VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                                                                     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    vkCmdFillBuffer(cmd, m_clusterQueue, 0, m_clusterQueue.size_bytes(), 0);
-  }
-
   // Zero the job queue
   shaders::JobStatus initJobStatus{};
   vkCmdUpdateBuffer(cmd, m_jobStatus, 0, sizeof(shaders::JobStatus), &initJobStatus);
 
   // Fill the per-mesh k-nearest instance buffer with ones in preparation for a short bubble sort
   vkCmdFillBuffer(cmd, m_sortingMeshInstances, 0, m_sortingMeshInstances.size_bytes(), 0xffffffff);
+
+  auto statsBuffer = m_stats.getFreeBuffer(allocator);
+  vkCmdFillBuffer(cmd, statsBuffer.deviceBuffer(), 0, statsBuffer.deviceBuffer().size_bytes(), 0);
 
   // Barrier: buffer updates -> sort instances
   memoryBarrier(cmd, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
@@ -484,27 +537,34 @@ OldTraverseBuffers LodMeshTraverser::traverse(ResourceAllocator*              al
   vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_traverseSortInstances);
   vkCmdPushConstants(cmd, m_traverseSortInstances.pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
                      sizeof(sortInstancesConstant), &sortInstancesConstant);
-  vkCmdDispatch(cmd, div_ceil(uint32_t(sceneVk.instances.size()), uint32_t(TRAVERSAL_WORKGROUP_SIZE)), 1, 1);
+  {
+    OptionalSection sec(profiler, "Traverse Sort", cmd);
+    vkCmdDispatch(cmd, div_ceil(uint32_t(sceneVk.instances.size()), uint32_t(TRAVERSAL_WORKGROUP_SIZE)), 1, 1);
+  }
 
   // Write traversal parameters
   shaders::TraversalConstants traversalConstants{
-      .traversalParams              = traversalParams,
-      .meshesAddress                = sceneVk.meshPointers.address(),
-      .instancesAddress             = sceneVk.instances.address(),
-      .nodeQueueAddress             = m_nodeQueue.address(),
-      .clusterQueueAddress          = m_clusterQueue.address(),
-      .jobStatusAddress             = m_jobStatus.address(),
-      .blasInputAddress             = deviceReinterpretCast<shaders::ClusterBLASInfoNV>(blasInput.address()),
-      .blasInputClustersAddress     = blasInputClusters.address(),
-      .drawClustersAddress          = vkobj::DeviceAddress<shaders::DrawCluster>(0),
-      .drawMeshTasksIndirectAddress = vkobj::DeviceAddress<shaders::DrawMeshTasksIndirect>(0),
-      .drawStatsAddress             = vkobj::DeviceAddress<shaders::DrawStats>(0),
-      .meshInstances                = m_meshInstances.address(),
-      .sortingMeshInstances         = m_sortingMeshInstances.address(),
-      .nodeQueueSize                = uint32_t(m_nodeQueue.size()),
-      .clusterQueueSize             = uint32_t(m_clusterQueue.size()),
-      .itemsSize                    = uint32_t(sceneVk.meshPointers.size()),
-      .drawClustersSize             = 0,
+      .traversalParams                       = traversalParams,
+      .meshesAddress                         = sceneVk.meshPointers.address(),
+      .instancesAddress                      = sceneVk.instances.address(),
+      .nodeQueueAddress                      = m_nodeQueue.address(),
+      .clusterQueueAddress                   = m_clusterQueue.address(),
+      .jobStatusAddress                      = m_jobStatus.address(),
+      .traverseStatsAddress                  = statsBuffer.deviceBuffer().address(),
+      .blasInputAddress                      = deviceReinterpretCast<shaders::ClusterBLASInfoNV>(blasInput.address()),
+      .blasInputClustersAddress              = blasInputClusters.address(),
+      .drawClustersAddress                   = vkobj::DeviceAddress<shaders::DrawCluster>(0),
+      .drawMeshTasksIndirectAddress          = vkobj::DeviceAddress<shaders::DrawMeshTasksIndirect>(0),
+      .drawStatsAddress                      = vkobj::DeviceAddress<shaders::DrawStats>(0),
+      .meshInstances                         = m_meshInstances.address(),
+      .sortingMeshInstances                  = m_sortingMeshInstances.address(),
+      .selectedClusters                      = vkobj::DeviceAddress<shaders::SelectedCluster>(0),
+      .writeSelectedClustersDispatchIndirect = vkobj::DeviceAddress<shaders::DispatchIndirect>(0),
+      .maxSelectedClusters                   = uint32_t(m_blas.maxTotalClusters()),
+      .nodeQueueSize                         = uint32_t(m_nodeQueue.size()),
+      .clusterQueueSize                      = uint32_t(m_clusterQueue.size()),
+      .itemsSize                             = uint32_t(sceneVk.meshPointers.size()),
+      .drawClustersSize                      = 0,
   };
 
   // Common to all shaders
@@ -520,7 +580,10 @@ OldTraverseBuffers LodMeshTraverser::traverse(ResourceAllocator*              al
 
   // Run: traverse init
   vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_traverseInit);
-  vkCmdDispatch(cmd, div_ceil(uint32_t(sceneVk.meshPointers.size()), uint32_t(TRAVERSAL_WORKGROUP_SIZE)), 1, 1);
+  {
+    OptionalSection sec(profiler, "Traverse Init", cmd);
+    vkCmdDispatch(cmd, div_ceil(uint32_t(sceneVk.meshPointers.size()), uint32_t(TRAVERSAL_WORKGROUP_SIZE)), 1, 1);
+  }
 
   // Barrier: traverse init -> traverse
   memoryBarrier(cmd, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
@@ -528,7 +591,10 @@ OldTraverseBuffers LodMeshTraverser::traverse(ResourceAllocator*              al
 
   // Run: traverse
   vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_traverse);
-  vkCmdDispatch(cmd, div_ceil(4096u, uint32_t(TRAVERSAL_WORKGROUP_SIZE)), 1, 1);
+  {
+    OptionalSection sec(profiler, "Traverse Main", cmd);
+    vkCmdDispatch(cmd, div_ceil(4096u, uint32_t(TRAVERSAL_WORKGROUP_SIZE)), 1, 1);
+  }
 
   // Barrier: traverse -> traverse verify
   memoryBarrier(cmd, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
@@ -536,10 +602,15 @@ OldTraverseBuffers LodMeshTraverser::traverse(ResourceAllocator*              al
 
   // Run: traverse verify
   vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_traverseVerify);
-  vkCmdDispatch(cmd, div_ceil(uint32_t(sceneVk.meshPointers.size()), uint32_t(TRAVERSAL_WORKGROUP_SIZE)), 1, 1);
+  {
+    OptionalSection sec(profiler, "Traverse Verify", cmd);
+    vkCmdDispatch(cmd, div_ceil(uint32_t(sceneVk.meshPointers.size()), uint32_t(TRAVERSAL_WORKGROUP_SIZE)), 1, 1);
+  }
 
   // Barrier: traverse verify -> BLAS build
   memoryBarrier(cmd, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR);
-  return garbage;
+
+  statsBuffer.copyToHost(submitSemaphore, cmd);
+  m_stats.queueBuffer(std::move(statsBuffer));
 }

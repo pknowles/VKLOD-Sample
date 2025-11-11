@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -83,6 +83,59 @@ void main()
   JobStatusArray         jobStatus = JobStatusArray(pc.jobStatusAddress);
   ClusterBLASInfoNVArray blasInput = ClusterBLASInfoNVArray(pc.blasInputAddress);
 
+  TraverseStatsRef traverseStats = TraverseStatsRef(pc.traverseStatsAddress);
+  if(blasInput.array[itemId].clusterReferencesCount == 0)
+    atomicAdd(traverseStats.d.errorEmptyTraversalResults, 1);
+
+#if TRAVERSE_PER_INSTANCE
+  // Fallback to lowest detail clusters if no clusters were produced. This would
+  // be a bug, but saves a crash during development.
+  if(blasInput.array[itemId].clusterReferencesCount == 0)
+  {
+    // Get the mesh's last group's cluster acceleration structures
+    ClusterGroupArray groups                                         = ClusterGroupArray(mesh.groupsAddress);
+    ClusterGroup      lastGroup                                      = groups.array[mesh.groupCount - 1];
+    Uint64Array       lastGroupClusterAccelerationStructureAddresses = Uint64Array(lastGroup.clasAddressesAddress);
+
+    // Write the last group's cluster as the only selected cluster. This should
+    // be the lowest detail LOD.
+    SelectedClusterArray selectedClusters = SelectedClusterArray(pc.selectedClusters);
+    uint32_t             offset           = atomicAdd(jobStatus.array[0].selectedClusterAlloc, 1);
+
+    // If this condition fails, the fallback path below should be taken. Ideally
+    // we have a min-detail BLAS, but that's quite a bit more work considering
+    // this is just a demonstration of what not to do.
+    if(offset < pc.maxSelectedClusters)
+    {
+      selectedClusters.array[offset] = SelectedCluster(uint32_t(itemId), lastGroupClusterAccelerationStructureAddresses.array[0]);
+      ++blasInput.array[itemId].clusterReferencesCount;
+    }
+  }
+
+  // Allocate BLAS input for all instances
+  uint64_t instanceClustersOffset =
+      atomicAdd(jobStatus.array[0].blasInputClustersAlloc, int(blasInput.array[itemId].clusterReferencesCount));
+
+  // Check for overflow and write the BLAS build input addresses
+  if(instanceClustersOffset + blasInput.array[itemId].clusterReferencesCount <= pc.maxSelectedClusters)
+  {
+    blasInput.array[itemId].clusterReferences = pc.blasInputClustersAddress + instanceClustersOffset * 8 /* sizeof(VkDeviceAddress) */;
+    blasInput.array[itemId].clusterReferencesCount = 0;  // reset before write_selected_clusters.comp.glsl uses it again for allocation
+  }
+  else
+  {
+    // Fall back to whatever the first few clusters will be. Include one extra
+    // cluster in case selectedClusters does not contain any clusters for this
+    // instance. The fallback could be anything and could flicker, but at least
+    // it stops us crashing from an empty or corrupt BLAS build. This relies on
+    // maxSelectedClusters being at least 1 + clusterReferencesCount or we'll
+    // get an out of bounds access.
+    blasInput.array[itemId].clusterReferences = pc.blasInputClustersAddress;
+    blasInput.array[itemId].clusterReferencesCount = 1;
+  }
+
+#else
+
   // Replace with lowest detail clusters if the traversal canary died or no
   // clusters were produced. Neither should typically happen.
   if(jobStatus.array[0].remaining != 0 || blasInput.array[itemId].clusterReferencesCount == 0)
@@ -105,6 +158,21 @@ void main()
 
     // DEBUGGING: Make it more visible by disappearing geometry
     blasInput.array[itemId].clusterReferencesCount = 1;
+  }
+#endif
+
+  if(gl_GlobalInvocationID.x == 0)
+  {
+    if(jobStatus.array[0].remaining != 0)
+      traverseStats.d.errorTraversalIncomplete = 1;
+    if(jobStatus.array[0].nodeQueue.write > pc.nodeQueueSize)
+      traverseStats.d.errorNodeQueueOverflow = 1;
+    if(jobStatus.array[0].clusterQueue.write > pc.clusterQueueSize)
+      traverseStats.d.errorClusterQueueOverflow = 1;
+#if TRAVERSE_PER_INSTANCE
+    if(jobStatus.array[0].selectedClusterAlloc > pc.maxSelectedClusters)
+      traverseStats.d.errorBlasInputOverflow = 1;
+#endif
   }
 
 #if 0

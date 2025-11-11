@@ -80,7 +80,8 @@ inline std::ostream& operator<<(std::ostream& os, const VkClusterAccelerationStr
   ios << "VkClusterAccelerationStructureBuildClustersBottomLevelInfoNV{\n";
   ios << "clusterReferencesCount " << x.clusterReferencesCount << "\n";
   ios << "clusterReferencesStride " << x.clusterReferencesStride << "\n";
-  ios << "clusterReferences[Address] " << x.clusterReferences << "\n";
+  //ios << "clusterReferences[Address] " << x.clusterReferences << "\n";
+  rangeSummaryVk<uint64_t>(ios << "clusterReferences ", x.clusterReferences, x.clusterReferencesCount) << "\n";
   {
     std::span hostArray(reinterpret_cast<const VkDeviceAddress*>(
                             BufferDownloader::download(x.clusterReferences, x.clusterReferencesCount * sizeof(VkDeviceAddress))),
@@ -131,6 +132,9 @@ public:
 
   VkDeviceSize deviceMemory() const { return m_deviceMemory; }
 
+  uint32_t maxTotalClusters() const { return m_maxTotalClusters; }
+  uint32_t maxClustersPerMesh() const { return m_maxClustersPerMesh; }
+
 private:
   // Worst case storage for per-instance BLAS cluster input
   vkobj::Buffer<VkDeviceAddress> m_clasAddresses;
@@ -157,24 +161,30 @@ private:
 class Tlas
 {
 public:
-  Tlas(ResourceAllocator* allocator, const vkobj::Buffer<VkAccelerationStructureInstanceKHR>& tlasInfo, VkCommandBuffer initCmd);
+  // alt: VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR
+  Tlas(ResourceAllocator*                                       allocator,
+       const vkobj::Buffer<VkAccelerationStructureInstanceKHR>& tlasInfo,
+       VkCommandBuffer                                          initCmd,
+       VkBuildAccelerationStructureFlagsKHR buildFlags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR);
+  Tlas(rt::BuiltAccelerationStructure tlas, vkobj::Buffer<std::byte> tlasScratchBuffer, VkBuildAccelerationStructureFlagsKHR buildFlags)
+      : m_tlas(std::move(tlas))
+      , m_tlasScratchBuffer(std::move(tlasScratchBuffer))
+      , m_buildFlags(buildFlags)
+  {
+  }
 
   void cmdUpdate(const vkobj::Buffer<VkAccelerationStructureInstanceKHR>& tlasInfo, VkCommandBuffer cmd, bool rebuild);
 
   // Returns the top level acceleration structure to be used by raytracing
   // shaders
-  VkAccelerationStructureKHR output() const { return *m_tlas; }
+  VkAccelerationStructureKHR output() const { return m_tlas; }
 
-  VkDeviceSize deviceMemory() const { return m_deviceMemory; }
+  VkDeviceSize size_bytes() const { return m_tlas.size_bytes() + m_tlasScratchBuffer.size_bytes(); }
 
 private:
-  std::unique_ptr<rt::BuiltAccelerationStructure> m_tlas;
-  vkobj::Buffer<std::byte>                        m_tlasScratchBuffer;
-
-  // alt: VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR
-  VkBuildAccelerationStructureFlagsKHR m_buildFlags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR;
-
-  VkDeviceSize m_deviceMemory = 0;
+  rt::BuiltAccelerationStructure       m_tlas;
+  vkobj::Buffer<std::byte>             m_tlasScratchBuffer;
+  VkBuildAccelerationStructureFlagsKHR m_buildFlags = {};
 };
 
 // Holds temporary fixed sized buffers for the streaming thread to build cluster

@@ -15,6 +15,8 @@
  * limitations under the License.
  */
 
+#include <glm/common.hpp>
+#include <nvvkhl/tonemap_postprocess.hpp>
 #include <renderer_common.hpp>
 #include <sample_vulkan_objects.hpp>
 
@@ -25,16 +27,18 @@ RendererCommon::RendererCommon(ResourceAllocator* allocator, SampleGlslCompiler&
     , m_bSkyParams(allocator, 1, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
 {
   // Tone down the sky intensity relative to the sun
-  m_skyParams.horizonColor *= 0.6;
-  m_skyParams.groundColor *= 0.6;
-  m_skyParams.skyColor *= 0.6;
+  //m_skyParams.horizonColor *= 0.6;
+  //m_skyParams.groundColor *= 0.6;
+  //m_skyParams.skyColor *= 0.6;
   m_skyParams.groundColor = m_skyParams.horizonColor;
 
   // Brighter yellow sun
-  m_skyParams.lightRadiance = glm::vec3(1.0f, 0.8f, 0.5f) * 2.0f;
+  m_skyParams.sunIntensity  = 4.0f;
+  m_skyParams.sunColor      = glm::vec3(1.0f, 0.9f, 0.7f);
+  m_skyParams.lightRadiance = m_skyParams.sunColor * m_skyParams.sunIntensity;
 }
 
-void RendererCommon::cmdUpdateParams(Framebuffer& framebuffer, nvh::CameraManipulator& camera, AABB sceneAabb, VkCommandBuffer cmd)
+void RendererCommon::cmdUpdateParams(Framebuffer& framebuffer, nvh::CameraManipulator& camera, float maxWorldDiagonalInObjectSpace, VkCommandBuffer cmd)
 {
   auto  imageSize       = framebuffer.size();
   float viewAspectRatio = float(imageSize.width) / float(imageSize.height);
@@ -48,14 +52,9 @@ void RendererCommon::cmdUpdateParams(Framebuffer& framebuffer, nvh::CameraManipu
   frameInfo.projInv         = glm::inverse(frameInfo.proj);
   frameInfo.viewInv         = glm::inverse(frameInfo.view);
   frameInfo.viewProj        = frameInfo.proj * frameInfo.view;
+  frameInfo.viewLast        = m_lastFrameInfo.view;
   frameInfo.camPos          = camera.getEye();
-  frameInfo.fogHeightOffset = sceneAabb.max.y;
-  frameInfo.fogHeightScale  = sceneAabb.max.y - sceneAabb.min.y;
   vkCmdUpdateBuffer(cmd, m_bFrameInfo, 0, sizeof(frameInfo), &frameInfo);
-
-  // Reset m_frameAccumIndex if the camera changed
-  if(frameInfo.view != m_lastFrameInfo.view || frameInfo.proj != frameInfo.proj)
-    m_frameAccumIndex = 0;
 
   // Update the sky
   vkCmdUpdateBuffer(cmd, m_bSkyParams, 0, sizeof(m_skyParams), &m_skyParams);
@@ -68,6 +67,7 @@ void RendererCommon::cmdUpdateParams(Framebuffer& framebuffer, nvh::CameraManipu
   if(!m_frameIndex || !m_config.lockLodCamera)
   {
     m_traversalParams.viewTransform = frameInfo.view;
+    m_traversalParams.viewPosition  = glm::vec3(frameInfo.viewInv[3]);
     m_traversalParams.hizViewProj   = m_lastFrameInfo.viewProj;
   }
 
@@ -76,7 +76,7 @@ void RendererCommon::cmdUpdateParams(Framebuffer& framebuffer, nvh::CameraManipu
 
   m_traversalParams.errorOverDistanceThreshold = errorOverDistanceThreshold;
   m_traversalParams.distanceToUNorm32 =
-      float(double(std::numeric_limits<uint32_t>::max()) / double(glm::length(sceneAabb.max - sceneAabb.min)));
+      float(double(std::numeric_limits<uint32_t>::max()) / double(maxWorldDiagonalInObjectSpace));
   m_traversalParams.useOcclusion      = m_config.useOcclusion ? 1 : 0;
   m_traversalParams.hizSizeFactors    = framebuffer.hizFarFactors();
   m_traversalParams.hizSizeMax        = framebuffer.hizFarMax();
@@ -111,17 +111,51 @@ bool RendererCommon::uiSky()
   ImGui::Text("Sun Orientation");
   PropertyEditor::begin();
   glm::vec3 dir                = m_skyParams.directionToLight;
+  changed =
+      PropertyEditor::entry("Sun Brightness",
+                            [&] { return ImGui::SliderFloat("Sun Brightness", &m_skyParams.sunIntensity, 0.0f, 100.0f); })
+      || changed;
   changed                      = ImGuiH::azimuthElevationSliders(dir, false) || changed;
   m_skyParams.directionToLight = dir;
+  m_skyParams.lightRadiance    = m_skyParams.sunColor * m_skyParams.sunIntensity;
   PropertyEditor::end();
-  ImGui::End();
   return changed;
 }
 
-void Framebuffer::deinit()
+TonemapPipeline::TonemapPipeline(VkDevice device, nvvk::ResourceAllocator* allocator)
+    : m_tonemapper(std::make_unique<nvvkhl::TonemapperPostProcess>(device, allocator))
+{
+  m_tonemapper->createComputePipeline();
+}
+
+TonemapPipeline::~TonemapPipeline() {}
+
+Framebuffer::Framebuffer(ResourceAllocator* allocator, SampleGlslCompiler& glslCompiler, TonemapPipeline& persistantTonemap, glm::uvec2 vpSize)
+    : m_gBuffer(allocator->getDevice(), allocator, VkExtent2D{vpSize.x, vpSize.y}, {c_colorFormat, c_colorLDRFormat}, s_depthFormat)
+    , m_allocator(allocator)
+    , m_hiz(allocator->getDevice(), glslCompiler)
+    , m_tonemap(persistantTonemap)
+{
+  initHiz(vpSize);
+  m_tonemap->updateComputeDescriptorSets(m_gBuffer.getDescriptorImageInfo(0), m_gBuffer.getDescriptorImageInfo(1));
+}
+
+Framebuffer::~Framebuffer()
 {
   m_hiz.deinitUpdateViews(m_hizUpdate);
   m_allocator->destroy(m_imgHizFar);
+}
+
+void Framebuffer::cmdTonemap(VkCommandBuffer cmd)
+{
+  m_tonemap->runCompute(cmd, {size().width, size().height});
+  memoryBarrier(cmd, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+}
+
+void Framebuffer::tonemapUI()
+{
+  m_tonemap->onUI();
 }
 
 glm::vec4 Framebuffer::hizFarFactors() const

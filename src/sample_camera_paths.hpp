@@ -100,6 +100,8 @@ public:
   ~CameraPathsElement();
   bool saveFrames() const { return m_saveFrames && m_cameraAnimating; }
   int  animationFrame() const { return m_cameraAnimationFrame; }
+  void toggleWindow() { m_showWindow = !m_showWindow; }
+  bool isWindowVisible() const { return m_showWindow; }
 
 private:
   using time_point = std::chrono::high_resolution_clock::time_point;

@@ -1,0 +1,58 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#version 460
+#extension GL_GOOGLE_include_directive : enable
+#extension GL_EXT_shader_explicit_arithmetic_types : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_int32 : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : enable
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_debug_printf : require
+
+#include "traverse_device_host.h"
+
+layout(local_size_x = 1) in;
+
+#ifndef TRAVERSE_PER_INSTANCE
+#error "Must define TRAVERSE_PER_INSTANCE"
+#endif
+
+layout(set = 0, binding = BTraversalConstants, scalar) uniform TraverseConstants_
+{
+  TraversalConstants pc;
+};
+
+uint div_up(uint n, uint d)
+{
+  return (n + d - 1) / d;
+}
+
+void main()
+{
+  // Write the number of TRAVERSAL_WORKGROUP_SIZE to launch to write the
+  // selected clusters to their individual BLAS input lists.
+  if(gl_GlobalInvocationID.x == 0)
+  {
+    JobStatusArray jobStatus = JobStatusArray(pc.jobStatusAddress);
+    DispatchIndirectArray writeSelectedClustersDispatchIndirect = DispatchIndirectArray(pc.writeSelectedClustersDispatchIndirect);
+    writeSelectedClustersDispatchIndirect.array[0] =
+        DispatchIndirect(div_up(jobStatus.array[0].selectedClusterAlloc, TRAVERSAL_WORKGROUP_SIZE), 1, 1);
+  }
+}

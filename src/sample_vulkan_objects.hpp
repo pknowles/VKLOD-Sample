@@ -23,8 +23,10 @@
 #include <memory>
 #include <memory_resource>
 #include <mutex>
+#include <nvh/nsightevents.h>
 #include <nvvk/memallocator_vk.hpp>
 #include <nvvk/resourceallocator_vk.hpp>
+#include <ranges>
 #include <ratio>
 #include <sample_allocation.hpp>
 #include <stdexcept>
@@ -105,6 +107,8 @@ using CommandPool = VulkanObject<VkCommandPool, VkCommandPoolCreateInfo, vkCreat
 using PipelineLayout = VulkanObject<VkPipelineLayout, VkPipelineLayoutCreateInfo, vkCreatePipelineLayout, vkDestroyPipelineLayout>;
 using Pipeline     = VulkanHandle<VkPipeline, vkDestroyPipeline>;
 using ShaderModule = VulkanObject<VkShaderModule, VkShaderModuleCreateInfo, vkCreateShaderModule, vkDestroyShaderModule>;
+using AccelerationStructureKHR =
+    VulkanObject<VkAccelerationStructureKHR, VkAccelerationStructureCreateInfoKHR, vkCreateAccelerationStructureKHR, vkDestroyAccelerationStructureKHR>;
 
 inline Semaphore makeTimelineSemaphore(VkDevice device, uint64_t initialValue)
 {
@@ -153,13 +157,15 @@ struct SemaphoreValue
     assert(value.valid());
     if(timeout != std::numeric_limits<uint64_t>::max())
     {
-      auto start = std::chrono::high_resolution_clock::now();
+      using Clock = std::chrono::high_resolution_clock;
+      auto start  = Clock::now();
       if(value.wait_for(std::chrono::nanoseconds(timeout)) == std::future_status::timeout)
         return false;
-      auto end = std::chrono::high_resolution_clock::now();
-      timeout -= uint64_t((end > start ? std::chrono::duration_cast<std::chrono::nanoseconds>(end - start) :
-                                         std::chrono::nanoseconds::zero())
-                              .count());
+      auto waited = Clock::now() - start;
+      if(waited < std::chrono::nanoseconds(timeout))
+        timeout -= uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(waited).count());
+      else
+        timeout = 0;
     }
     try
     {
@@ -271,7 +277,11 @@ public:
   ByteBuffer(ResourceAllocator* allocator, Range&& range, VkBufferUsageFlags usageFlags, VkMemoryPropertyFlags propertyFlags, VkCommandBuffer cmd)
       : m_allocator(allocator)
       // align to 4 bytes to guarantee assumption even though the allocator would do this anyway
-      , m_buffer(allocator->createBuffer(cmd, nvh::align_up(sizeof(*range.data()) * range.size(), 4), range.data(), usageFlags | debugUsageFlags, propertyFlags))
+      , m_buffer(allocator->createBuffer(cmd,
+                                         nvh::align_up(sizeof(std::ranges::range_value_t<Range>) * std::ranges::size(range), 4),
+                                         std::ranges::data(range),
+                                         usageFlags | debugUsageFlags,
+                                         propertyFlags))
   {
   }
   ~ByteBuffer() { destroy(); }
@@ -380,12 +390,6 @@ public:
   }
 
   operator const VkBuffer&() const { return m_buffer; }
-
-  ByteBuffer moveByteBuffer()
-  {
-    m_size = 0;
-    return std::move(m_buffer);
-  }
 
 private:
   size_t     m_size = 0;
@@ -643,16 +647,14 @@ public:
   ImmediateCommandBuffer& operator=(const ImmediateCommandBuffer& other) = delete;
   ImmediateCommandBuffer& operator=(ImmediateCommandBuffer&& other) noexcept
   {
-    destroy();
+    submit();
     m_cmd   = std::move(other.m_cmd);
     m_queue = other.m_queue;
     return *this;
   }
-  ~ImmediateCommandBuffer() { destroy(); }
+  ~ImmediateCommandBuffer() { submit(); }
   operator VkCommandBuffer() const { return m_cmd; }
-
-private:
-  void destroy()
+  void submit()
   {
     if(m_cmd)
     {
@@ -661,6 +663,8 @@ private:
       NVVK_CHECK(vkQueueWaitIdle(m_queue));
     }
   }
+
+private:
   BuildingCommandBuffer m_cmd;
   VkQueue               m_queue;
 };
@@ -684,17 +688,15 @@ public:
   ImmediateCommandBuffer& operator=(const ImmediateCommandBuffer& other) = delete;
   ImmediateCommandBuffer& operator=(ImmediateCommandBuffer&& other) noexcept
   {
-    destroy();
+    submit();
     m_cmd       = std::move(other.m_cmd);
     m_queue     = other.m_queue;
     m_stageMask = other.m_stageMask;
     return *this;
   }
-  ~ImmediateCommandBuffer() { destroy(); }
+  ~ImmediateCommandBuffer() { submit(); }
   operator VkCommandBuffer() const { return m_cmd; }
-
-private:
-  void destroy()
+  void submit()
   {
     if(m_cmd)
     {
@@ -703,6 +705,8 @@ private:
       NVVK_CHECK(vkQueueWaitIdle(m_queue->queue));
     }
   }
+
+private:
   BuildingCommandBuffer m_cmd;
   TimelineQueue*        m_queue = nullptr;
   VkPipelineStageFlags2 m_stageMask;
@@ -751,7 +755,7 @@ template <class T>
 std::span<const T> downloadNow(ResourceAllocator* allocator, VkCommandPool pool, VkQueue queue, Buffer<T>& array)
 {
   ImmediateCommandBuffer cmd(allocator->getDevice(), pool, queue);
-  return cmdFromArray(*allocator->getStaging(), cmd, array);
+  return cmdStagedDownload(*allocator->getStaging(), cmd, array);
 }
 
 // Uploads source to the destination array
@@ -761,31 +765,85 @@ void uploadNow(ResourceAllocator* allocator, VkCommandPool pool, VkQueue queue, 
   std::span<T> mapped;
   {
     ImmediateCommandBuffer cmd(allocator->getDevice(), pool, queue);
-    mapped = cmdToArray(*allocator->getStaging(), cmd, destination);
+    mapped = cmdStagedUpload(*allocator->getStaging(), cmd, destination);
   }
   std::ranges::copy(source, mapped);
 }
 
 template <class T>
-std::span<const T> cmdFromArray(nvvk::StagingMemoryManager& staging, VkCommandBuffer cmd, const Buffer<T>& array)
+std::span<const T> cmdStagedDownload(nvvk::StagingMemoryManager& staging, VkCommandBuffer cmd, const Buffer<T>& array)
 {
   return std::span(staging.cmdFromBufferT<const T>(cmd, array, 0, array.size_bytes()), array.size());
 }
 
 template <class T>
-std::span<T> cmdToArray(nvvk::StagingMemoryManager& staging, VkCommandBuffer cmd, const Buffer<T>& array)
+std::span<const T> cmdStagedDownload(nvvk::StagingMemoryManager& staging, VkCommandBuffer cmd, const Buffer<T>& array, size_t count)
+{
+  return std::span(staging.cmdFromBufferT<const T>(cmd, array, 0, count * sizeof(T)), count);
+}
+
+template <class T>
+std::span<T> cmdStagedUpload(nvvk::StagingMemoryManager& staging, VkCommandBuffer cmd, const Buffer<T>& array)
 {
   return std::span(staging.cmdToBufferT<T>(cmd, array, 0, array.size_bytes()), array.size());
 }
 
 template <std::ranges::contiguous_range Range, class T>
   requires std::is_same_v<std::ranges::range_value_t<Range>, T>
-void cmdToArray(nvvk::StagingMemoryManager& staging, VkCommandBuffer cmd, Range&& input, const Buffer<T>& array)
+void cmdStagedUpload(nvvk::StagingMemoryManager& staging, VkCommandBuffer cmd, Range&& input, const Buffer<T>& array)
 {
   if(std::ranges::size(input) > array.size())
-    throw std::runtime_error("cmdToArray input out of bounds");
+    throw std::runtime_error("cmdStagedUpload input out of bounds");
   staging.cmdToBuffer(cmd, array, 0, std::ranges::size(input) * sizeof(T), std::ranges::data(input));
 }
+
+// Scoped push/pop wrapper for NVTX range markers
+#ifndef NVP_SUPPORTS_NVTOOLSEXT
+#error "NVP_SUPPORTS_NVTOOLSEXT is not defined"
+#endif
+class NvtxRange
+{
+public:
+  [[nodiscard]] explicit NvtxRange([[maybe_unused]] const char* name) { NX_RANGEPUSH(name); }
+
+  [[nodiscard]] explicit NvtxRange([[maybe_unused]] const char* name, [[maybe_unused]] uint32_t color)
+  {
+    NX_RANGEPUSHCOL(name, color);
+  }
+
+  ~NvtxRange() { NX_RANGEPOP(); }
+
+  NvtxRange(const NvtxRange&)            = delete;
+  NvtxRange& operator=(const NvtxRange&) = delete;
+};
+
+// Scoped wrapper for Vulkan debug utils labels
+class ScopedDebugLabel
+{
+public:
+  [[nodiscard]] explicit ScopedDebugLabel(VkCommandBuffer      cmd,
+                                          const std::string&   label,
+                                          std::array<float, 4> color = {1.0f, 1.0f, 1.0f, 1.0f})
+      : m_cmd(cmd)
+      , m_nvtxRange(label.c_str())  // mark the CPU work too
+  {
+    VkDebugUtilsLabelEXT labelInfo{
+        .sType      = VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT,
+        .pNext      = nullptr,
+        .pLabelName = label.c_str(),
+        .color      = {color[0], color[1], color[2], color[3]},
+    };
+    vkCmdBeginDebugUtilsLabelEXT(cmd, &labelInfo);
+  }
+  ~ScopedDebugLabel() { vkCmdEndDebugUtilsLabelEXT(m_cmd); }
+  ScopedDebugLabel(const ScopedDebugLabel&)            = delete;
+  ScopedDebugLabel& operator=(const ScopedDebugLabel&) = delete;
+
+private:
+  VkCommandBuffer m_cmd;
+  NvtxRange       m_nvtxRange;
+};
+
 
 }  // namespace vkobj
 

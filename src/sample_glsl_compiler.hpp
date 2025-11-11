@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -288,6 +288,21 @@ struct SimpleComputePipeline
     vkCreateComputePipelines(device, nullptr, 1, &computePipelineCreateInfo, nullptr, &newPipeline);
     pipeline = vkobj::Pipeline(device, std::move(newPipeline));
   }
+
+  // Convenience overloads for a const ref to compiler options
+  SimpleComputePipeline(VkDevice device, SampleGlslCompiler& glslCompiler, const std::filesystem::path& path, const shaderc::CompileOptions& options)
+      : SimpleComputePipeline(device, glslCompiler, path, &options)
+  {
+  }
+  SimpleComputePipeline(VkDevice                       device,
+                        SampleGlslCompiler&            glslCompiler,
+                        const std::filesystem::path&   path,
+                        VkDescriptorSetLayout          descriptorsetLayout,
+                        const shaderc::CompileOptions& options)
+      : SimpleComputePipeline(device, glslCompiler, path, descriptorsetLayout, &options)
+  {
+  }
+
   operator VkPipeline() const { return pipeline; }
   vkobj::PipelineLayout pipelineLayout;
   vkobj::Pipeline       pipeline;

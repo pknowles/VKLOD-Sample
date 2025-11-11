@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -25,17 +25,21 @@
 #include <mutex>
 #include <nvvk/memallocator_vk.hpp>
 #include <set>
+#include <unordered_map>
 #include <vulkan/vulkan_core.h>
 
 // A remote allocator that suballocates a given range of memory. Uses a sorted
-// binary tree free list.
-// TODO: merge freed allocations in the free list
+// binary tree free list keyed by size. Tables index start and end ranges so
+// freed allocations can be joined with existing items in the free list.
+// Disclaimer: I'm not an allocation expert. There are a lot of well understood
+// solutions out there.
 class PoolAllocator
 {
   struct Range
   {
     VkDeviceAddress address;
     VkDeviceSize    size;
+    VkDeviceAddress end() const { return address + size; }
     bool            operator<(const Range& other) const
     {
       return size == other.size ? address < other.address : size < other.size;
@@ -43,11 +47,15 @@ class PoolAllocator
   };
 
 public:
+  static constexpr VkDeviceSize ExternalFragmentationThreshold = 128ull << 10;
+
   PoolAllocator(VkDeviceAddress address, VkDeviceSize size)
       : m_base(address)
       , m_bytesTotal(size)
-      , m_initialBlockSize(size)
+      , m_fragmentationExternal(size < ExternalFragmentationThreshold ? size : 0)
       , m_freeList({{m_base, m_bytesTotal}})
+      , m_freeListStarts({{m_base, {m_base, m_bytesTotal}}})
+      , m_freeListEnds({{m_base + m_bytesTotal, {m_base, m_bytesTotal}}})
   {
   }
 
@@ -58,11 +66,12 @@ public:
 
     VkDeviceSize allocSize = adjustSize(userSize);
 
+    //fmt::println("Allocating {} bytes for request of size {}", allocSize, userSize);
+
     // Binary search to find free allocation
     auto it = m_freeList.lower_bound({0, allocSize});
     for(; it != m_freeList.end(); ++it)
     {
-      VkDeviceSize freeSize = it->size;
       assert(allocSize <= it->size);
       void* resultVP = reinterpret_cast<void*>(it->address);
       static_assert(sizeof(void*) == sizeof(VkDeviceAddress));  // TODO: x32 ... ?
@@ -71,18 +80,17 @@ public:
       {
         VkDeviceAddress result = reinterpret_cast<VkDeviceAddress>(resultVP);
         // Reinsert any remaining space in the free block
-        m_freeList.erase(it);
+        removeFreeRange(*it);
         assert(remaining >= allocSize);
         if(remaining > allocSize)
-          m_freeList.insert({result + allocSize, remaining - allocSize});
+        {
+          Range remainingRange = {result + allocSize, remaining - allocSize};
+          insertFreeRange(remainingRange);
+        }
 
         // Track memory usage, excluding alignment and fragmentation overhead
         m_bytesAllocated += userSize;
         m_fragmentationInternal += allocSize - userSize;
-        if(freeSize == m_initialBlockSize)
-          m_initialBlockSize = remaining - allocSize;  // track one block size to remove from m_fragmentationOuter
-        else
-          m_fragmentationExternal -= freeSize;  // reusing freed blocks reduces the outer fragmentation
         return result;
       }
       // else, does not fit due to alignment
@@ -94,53 +102,98 @@ public:
   {
     std::lock_guard lk(m_mutex);
     m_bytesAllocated -= userSize;
-    VkDeviceSize allocSize = adjustSize(userSize);  // match the adjustment done in allocate()
+    Range range = {address, adjustSize(userSize)};  // match the adjustment done in allocate()
+    assert(m_fragmentationInternal >= range.size - userSize);
+    m_fragmentationInternal -= range.size - userSize;
+    if(auto joinEnd = m_freeListStarts.find(range.end()); joinEnd != m_freeListStarts.end())
+    {
+      Range joinWith = joinEnd->second;
+      removeFreeRange(joinWith);
+      range = {range.address, range.size + joinWith.size};
+      //fmt::println("Joined end of range at {}", range.address);
+    }
+    if(auto joinStart = m_freeListEnds.find(range.address); joinStart != m_freeListEnds.end())
+    {
+      Range joinWith = joinStart->second;
+      removeFreeRange(joinWith);
+      range = {joinWith.address, range.size + joinWith.size};
+      //fmt::println("Joined start of range at {}", range.address);
+    }
     try
     {
-      [[maybe_unused]] auto [it, inserted] = m_freeList.insert({address, allocSize});
-      assert(inserted);  // should never collide
+      insertFreeRange(range);
     }
     catch(const std::bad_alloc&)
     {
       std::terminate();  // fatal. mostly for coverity. could also just leak
     }
     //fprintf(stderr, "Free list size: %zu\n", m_freeList.size());
-    assert(m_fragmentationInternal >= allocSize - userSize);
-    m_fragmentationInternal -= allocSize - userSize;
-    m_fragmentationExternal += allocSize;
   }
 
   VkDeviceSize offsetOf(VkDeviceAddress address) const { return address - m_base; }
-
   VkDeviceSize bytesAllocated() const
   {
     std::lock_guard lk(m_mutex);
     return m_bytesAllocated;
   }
-
   VkDeviceSize size() const { return m_bytesTotal; }
-
-  VkDeviceSize internalFragmentation() const { return m_fragmentationInternal; }
-
-  VkDeviceSize externalFragmentation() const { return m_fragmentationExternal; }
-
+  VkDeviceSize internalFragmentation() const
+  {
+    std::lock_guard lk(m_mutex);
+    return m_fragmentationInternal;
+  }
+  VkDeviceSize externalFragmentation() const
+  {
+    std::lock_guard lk(m_mutex);
+    return m_fragmentationExternal;
+  }
   VkDeviceSize fragmentation() const { return internalFragmentation() + externalFragmentation(); }
 
 private:
   static VkDeviceSize adjustSize(VkDeviceSize size)
   {
-    // Grow size to next power of two to reduce fragmentation
-    return std::bit_ceil(size);
+    if(size < (4ull << 10))
+    {
+      // Grow size to next power of two to reduce fragmentation
+      return std::bit_ceil(size);
+    }
+
+    // Align to 4KiB
+    constexpr VkDeviceSize alignment = 4ull << 10;
+    return (size + alignment - 1) & ~(alignment - 1);
   }
 
-  VkDeviceAddress    m_base                  = 0;
-  VkDeviceSize       m_bytesAllocated        = 0;
-  VkDeviceSize       m_bytesTotal            = 0;
-  VkDeviceSize       m_fragmentationInternal = 0;
-  VkDeviceSize       m_fragmentationExternal = 0;
-  VkDeviceSize       m_initialBlockSize      = 0;  // used to filter the initial block out of m_fragmentationOuter
-  std::set<Range>    m_freeList;
-  mutable std::mutex m_mutex;
+  void insertFreeRange(const Range& range)
+  {
+    [[maybe_unused]] auto [it, inserted] = m_freeList.insert(range);
+    assert(inserted);  // should never collide
+    m_freeListStarts.insert({range.address, range});
+    m_freeListEnds.insert({range.end(), range});
+    if(range.size < ExternalFragmentationThreshold)
+      m_fragmentationExternal += range.size;
+  }
+
+  void removeFreeRange(const Range& range)
+  {
+    m_freeList.erase(range);
+    m_freeListStarts.erase(range.address);
+    m_freeListEnds.erase(range.end());
+    if(range.size < ExternalFragmentationThreshold)
+    {
+      assert(m_fragmentationExternal >= range.size);
+      m_fragmentationExternal -= range.size;
+    }
+  }
+
+  VkDeviceAddress                            m_base                  = 0;
+  VkDeviceSize                               m_bytesAllocated        = 0;
+  VkDeviceSize                               m_bytesTotal            = 0;
+  VkDeviceSize                               m_fragmentationInternal = 0;
+  VkDeviceSize                               m_fragmentationExternal = 0;
+  std::set<Range>                            m_freeList;
+  std::unordered_map<VkDeviceAddress, Range> m_freeListStarts;
+  std::unordered_map<VkDeviceAddress, Range> m_freeListEnds;
+  mutable std::mutex                         m_mutex;
 };
 
 // Move-only destructing memory allocation from PoolAllocator

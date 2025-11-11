@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -21,7 +21,9 @@
 #include <condition_variable>
 #include <lod_streaming_jobs.hpp>
 #include <mutex>
+#include <queue>
 #include <sample_allocation.hpp>
+#include <sample_garbage.hpp>
 #include <sample_glsl_compiler.hpp>
 #include <sample_vulkan_objects.hpp>
 #include <shaders/shaders_scene.h>
@@ -145,19 +147,23 @@ public:
   static constexpr uint32_t PositionTruncateBits = 0;
   static constexpr uint32_t MaxGroupsPerBuild    = 1;
 #else
-  static constexpr uint32_t MaxRequests          = 256;
-  static constexpr uint32_t MaxLoadUnloads       = 256;
+  // Smaller values == consistent frame times/less stutter
+  // Larger values == better streaming latency and higher bandwidth
+  static constexpr uint32_t MaxRequests          = 4096;
+  static constexpr uint32_t MaxLoadUnloads       = 512;
   static constexpr uint32_t PositionTruncateBits = 0;
-  static constexpr uint32_t MaxGroupsPerBuild    = 256;
+  static constexpr uint32_t MaxGroupsPerBuild    = 512;
 #endif
 
   StreamingSceneVk(ResourceAllocator*    allocator,
                    SampleGlslCompiler&   glslCompiler,
-                   VkDeviceSize          geometryBufferBytes,
+                   VkDeviceSize          geometryBufferBytes,  // Streaming limit in bytes
+                   uint32_t              maxResidentGroups,    // Streaming limit in cluster groups
                    VkCommandPool         initPool,
                    vkobj::TimelineQueue& initQueue,
                    const Scene&          scene,
                    SceneVK&              sceneVk,
+                   bool                  greedyUnload,
                    bool                  requiresClas,
                    uint32_t              streamingTransferQueueFamilyIndex,
                    VkQueue               streamingTransferQueue);
@@ -177,18 +183,18 @@ public:
   bool modifyGroups(ResourceAllocator*            allocator,
                     const Scene&                  scene,
                     vkobj::Buffer<shaders::Mesh>& meshPointers,
-                    std::vector<ClusterGroupVk>&  unloadGarbage,
+                    std::queue<Garbage>&          unloadGarbage,
                     vkobj::SemaphoreValue         unloadGarbageSemaphore,
                     bool                          block,
                     VkCommandBuffer               cmd,
                     uint64_t&                     totalResidentClusters,  // TODO: clean up too many params
                     uint64_t&                     totalResidentInstanceClusters);
 
-  VkDeviceSize bytesAllocated() const { return m_memoryPool.bytesAllocated(); }
-  VkDeviceSize internalFragmentation() const { return m_memoryPool.internalFragmentation(); }
-  uint32_t     pendingRequests() const { return m_pendingRequests; }
-  size_t       stagingMemoryUsage() const { return m_geometryLoaderMemory + m_staticStagingMemory; }
-  bool         requiresClas() const { return m_requiresClas; }
+  const PoolAllocator& pool() const { return m_memoryPool; }
+  uint32_t             pendingRequests() const { return m_pendingRequests; }
+  uint32_t             residentGroups() const { return m_residentGroupsStat; }
+  size_t               stagingMemoryUsage() const { return m_geometryLoaderMemory + m_staticStagingMemory; }
+  bool                 requiresClas() const { return m_requiresClas; }
 
   // Synchronously fulfill all streaming requests. Called on the render thread
   void flush(ResourceAllocator*            allocator,
@@ -199,6 +205,8 @@ public:
              vkobj::Buffer<shaders::Mesh>& meshPointers,
              uint64_t&                     totalResidentClusters,  // TODO: clean up too many params
              uint64_t&                     totalResidentInstanceClusters);
+
+  bool setGreedyUnload(bool greedyUnload) { return m_greedyUnload.exchange(greedyUnload); }
 
 private:
   void geometryLoaderEntrypoint(std::unique_ptr<const Scene> scene);  // pointer to war coverity large pass-by-value warning
@@ -248,9 +256,13 @@ private:
   streaming::ModifyGroupsProgram               m_modifyGroupsProgram;
   streaming::FillClasInputProgram              m_fillClasInputProgram;
   streaming::PackClasProgram                   m_packClasProgram;
+  uint32_t                                     m_residentGroups       = 0;  // owned by m_geometryLoaderThread
+  uint32_t                                     m_maxResidentGroups    = 0;
+  std::atomic<bool>                            m_greedyUnload         = false;
   std::atomic<bool>                            m_running              = true;
   std::atomic<uint32_t>                        m_pendingRequests      = 0;
   std::atomic<size_t>                          m_geometryLoaderMemory = 0;
+  std::atomic<uint32_t>                        m_residentGroupsStat   = 0;  // readable by render thread
   size_t                                       m_staticStagingMemory  = 0;
   std::jthread                                 m_geometryLoaderThread;
 };

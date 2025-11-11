@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2023-2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -80,47 +80,29 @@ class BuiltAccelerationStructure;
 class AccelerationStructure
 {
 public:
-  AccelerationStructure()                                   = delete;
-  AccelerationStructure(const AccelerationStructure& other) = delete;
-  AccelerationStructure(AccelerationStructure&& other)
-      : m_allocator(std::move(other.m_allocator))
-      , m_type(std::move(other.m_type))
-      , m_size(std::move(other.m_size))
-      , m_buffer(std::move(other.m_buffer))
-      , m_accelerationStructure(std::move(other.m_accelerationStructure))
-      , m_address(std::move(other.m_address))
-  {
-    other.m_allocator             = nullptr;
-    other.m_type                  = {};
-    other.m_size                  = {};
-    other.m_accelerationStructure = VK_NULL_HANDLE;
-    other.m_address               = {};
-  }
+  AccelerationStructure() = delete;
   AccelerationStructure(ResourceAllocator*                              allocator,
                         VkAccelerationStructureTypeKHR                  type,
                         const VkAccelerationStructureBuildSizesInfoKHR& size,
                         VkAccelerationStructureCreateFlagsKHR           flags)
-      : m_allocator(allocator)
-      , m_type(type)
-      , m_size(size)
+      : m_type(type)
+      , m_sizes(size)
       , m_buffer(allocator,
-                 m_size.accelerationStructureSize,
+                 m_sizes.accelerationStructureSize,
                  VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
                  VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
-      , m_accelerationStructure(VK_NULL_HANDLE)
+      , m_accelerationStructure(allocator->getDevice(),
+                                VkAccelerationStructureCreateInfoKHR{
+                                    .sType         = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
+                                    .pNext         = nullptr,
+                                    .createFlags   = flags,
+                                    .buffer        = m_buffer,
+                                    .offset        = 0,
+                                    .size          = m_sizes.accelerationStructureSize,
+                                    .type          = m_type,
+                                    .deviceAddress = 0,
+                                })
   {
-    VkAccelerationStructureCreateInfoKHR createInfo{
-        .sType         = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
-        .pNext         = nullptr,
-        .createFlags   = flags,
-        .buffer        = m_buffer,
-        .offset        = 0,
-        .size          = m_size.accelerationStructureSize,
-        .type          = m_type,
-        .deviceAddress = 0,
-    };
-    NVVK_CHECK(vkCreateAccelerationStructureKHR(allocator->getDevice(), &createInfo, nullptr, &m_accelerationStructure));
-
     VkAccelerationStructureDeviceAddressInfoKHR addressInfo{
         .sType                 = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
         .pNext                 = nullptr,
@@ -128,30 +110,20 @@ public:
     };
     m_address = vkGetAccelerationStructureDeviceAddressKHR(allocator->getDevice(), &addressInfo);
   }
-  ~AccelerationStructure()
-  {
-    if(m_allocator)
-    {
-      vkDestroyAccelerationStructureKHR(m_allocator->getDevice(), m_accelerationStructure, nullptr);
-    }
-  }
-  AccelerationStructure&                          operator=(const AccelerationStructure& other) = delete;
-  AccelerationStructure&                          operator=(AccelerationStructure&& other)      = delete;
   const VkAccelerationStructureTypeKHR&           type() const { return m_type; }
-  const VkAccelerationStructureBuildSizesInfoKHR& sizes() { return m_size; }
+  const VkAccelerationStructureBuildSizesInfoKHR& sizes() const { return m_sizes; }
 
 private:
   // Use the C++ type system to hide access to the object until it is built with
   // BuiltAccelerationStructure. This adds a little compile-time state checking.
   friend class BuiltAccelerationStructure;
-  const VkAccelerationStructureKHR& object() const { return m_accelerationStructure; }
-  const VkDeviceAddress&            address() const { return m_address; }
+  VkAccelerationStructureKHR object() const { return m_accelerationStructure; }
+  const VkDeviceAddress&     address() const { return m_address; }
 
-  ResourceAllocator*                       m_allocator;
   VkAccelerationStructureTypeKHR           m_type;
-  VkAccelerationStructureBuildSizesInfoKHR m_size;
+  VkAccelerationStructureBuildSizesInfoKHR m_sizes;
   vkobj::ByteBuffer                        m_buffer;
-  VkAccelerationStructureKHR               m_accelerationStructure;
+  vkobj::AccelerationStructureKHR          m_accelerationStructure;
   VkDeviceAddress                          m_address;
 };
 
@@ -216,9 +188,9 @@ public:
                          VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, 0, 1, &barrier, 0, nullptr, 0, nullptr);
   }
 
-  operator const VkAccelerationStructureKHR&() const { return m_accelerationStructure.object(); }
-  const VkAccelerationStructureKHR& object() const { return m_accelerationStructure.object(); }
-  const VkDeviceAddress&            address() const { return m_accelerationStructure.address(); }
+                  operator VkAccelerationStructureKHR() const { return m_accelerationStructure.object(); }
+  VkDeviceSize    size_bytes() const { return m_accelerationStructure.sizes().accelerationStructureSize; }
+  VkDeviceAddress address() const { return m_accelerationStructure.address(); }
 
 private:
   AccelerationStructure m_accelerationStructure;

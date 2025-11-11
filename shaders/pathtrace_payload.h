@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2022-2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2022-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -23,6 +23,13 @@ namespace shaders {
 using vec3 = nvmath::vec3f;
 #endif  // __cplusplus
 
+#define EVENT_TYPE_GEN 0
+#define EVENT_TYPE_MISS 1
+#define EVENT_TYPE_DIFFUSE 2
+#define EVENT_TYPE_SPECULAR 3
+#define EVENT_TYPE_TRANSPARENCY 4
+#define EVENT_TYPE_SHADOW 5
+
 struct HitPayload
 {
   vec3 radiance;
@@ -31,6 +38,9 @@ struct HitPayload
   vec3 direction;
   uint seed;
   int  depth;
+  int  eventType;
+  u8vec4 albedoMetalness;
+  u8vec4 normalRoughness;
 };
 
 HitPayload initPayload(vec3 pos, vec3 dir, uint seed)
@@ -41,6 +51,7 @@ HitPayload initPayload(vec3 pos, vec3 dir, uint seed)
   p.origin        = pos;
   p.direction     = dir;
   p.depth         = 0;
+  p.eventType     = EVENT_TYPE_GEN;
   p.seed          = seed;
   return p;
 }

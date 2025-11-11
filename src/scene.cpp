@@ -82,7 +82,7 @@ constexpr inline glm::vec3 corner(const AABB& aabb, int cornerBits)
 // https://stackoverflow.com/a/58630206
 inline AABB transform(const glm::mat4& m, AABB aabb)
 {
-  AABB result;
+  AABB result = AABB::make_empty();
   for(int i = 0; i < 8; ++i)
   {
     glm::vec3 c = m * glm::vec4(corner(aabb, i), 1.0f);
@@ -149,7 +149,7 @@ nvclusterlod::LocalizedLodMesh makeLodMesh(nvclusterlod_Context        context,
   nvclusterlod::LocalizedLodMesh localizedLodMesh;
   nvclusterlod_Result            result = nvclusterlod::generateLocalizedLodMesh(context, input, localizedLodMesh);
   if(result != nvclusterlod_Result::NVCLUSTERLOD_SUCCESS)
-    throw std::runtime_error("nvclusterlod::generateLocalizedLodMesh() failed");
+    throw std::runtime_error("nvclusterlod::generateLocalizedLodMesh() failed: " + std::string(nvclusterlodResultString(result)));
   return localizedLodMesh;
 }
 
@@ -255,29 +255,24 @@ std::vector<std::pair<cgltf_mesh*, glm::mat4>> flatSceneInstances(NodesList scen
 struct Mesh
 {
   Mesh(const CgltfPrimitive& primitive, std::unordered_map<std::u8string, size_t>& imagesIndex);
+  Mesh(SimpleMesh&& simpleMesh);
   std::vector<glm::uvec3> meshTriIndices;
   std::vector<glm::vec3>  meshPositions;
   std::vector<glm::vec3>  meshNormals;
   std::vector<glm::vec2>  meshTexCoords;
-  shaders::Material       material;
+  shaders::Material       material = {
+            .albedo                   = {0.4f, 0.4f, 0.4f, 1.0f},
+            .albedoTexture            = -1,
+            .metallicRoughnessTexture = -1,
+            .padding2                 = -1,
+            .padding3                 = -1,
+            .roughness                = 0.8f,
+            .metallic                 = 0.05f,
+  };
 };
 
 Mesh::Mesh(const CgltfPrimitive& primitive, std::unordered_map<std::u8string, size_t>& imagesIndex)
 {
-#if 0
-      try
-      {
-        meshops::ArrayView<const glm::uvec3> indices(primitive.indices<uint32_t>());
-        std::ranges::copy(indices, std::back_inserter(meshTriIndices));
-      }
-      catch([[maybe_unused]] const std::runtime_error& e)
-      {
-        meshops::ArrayView<const glm::u16vec3> indices(primitive.indices<uint16_t>());
-        std::ranges::copy(indices, std::back_inserter(meshTriIndices));
-      }
-      meshops::ArrayView<const glm::vec3> positions(primitive.attribute<glm::vec3>(cgltf_attribute_type_position).value());
-      std::ranges::copy(positions, std::back_inserter(meshPositions));
-#else
   // Rebuild topology with unique positions only, merging vertices that may
   // have been split due to hard edges.
   meshops::ArrayView<const glm::vec3> positions(primitive.attribute<glm::vec3>(cgltf_attribute_type_position).value());
@@ -303,19 +298,20 @@ Mesh::Mesh(const CgltfPrimitive& primitive, std::unordered_map<std::u8string, si
     }
     return it->second;
   };
-  try
-  {
-    meshops::ArrayView<const glm::uvec3> indices(primitive.indices<uint32_t>());
+  auto copyIndices = [&](auto indices) {
     for(auto& t : indices)
       meshTriIndices.emplace_back(uniqueIndex(t.x), uniqueIndex(t.y), uniqueIndex(t.z));
-  }
-  catch([[maybe_unused]] const std::runtime_error& e)
+  };
+  if(primitive.has_indices<uint32_t>())
+    copyIndices(meshops::ArrayView<const glm::uvec3>(primitive.indices<uint32_t>()));
+  else if(primitive.has_indices<uint16_t>())
+    copyIndices(meshops::ArrayView<const glm::u16vec3>(primitive.indices<uint16_t>()));
+  else if(primitive.has_indices<uint8_t>())
+    copyIndices(meshops::ArrayView<const glm::u8vec3>(primitive.indices<uint8_t>()));
+  else
   {
-    meshops::ArrayView<const glm::u16vec3> indices(primitive.indices<uint16_t>());
-    for(auto& t : indices)
-      meshTriIndices.emplace_back(uniqueIndex(t.x), uniqueIndex(t.y), uniqueIndex(t.z));
+    throw std::runtime_error("No compatible indices found for mesh");
   }
-#endif
 
   // Generate angle-weighted normals if missing
   if(meshNormals.empty())
@@ -341,36 +337,44 @@ Mesh::Mesh(const CgltfPrimitive& primitive, std::unordered_map<std::u8string, si
   {
     const cgltf_pbr_metallic_roughness& pbr = primitive.material->pbr_metallic_roughness;
     std::ranges::copy(pbr.base_color_factor, glm::value_ptr(material.albedo));
-    if(pbr.base_color_texture.texture)
-    {
-      const cgltf_image* baseImage = pbr.base_color_texture.texture->image;
-      assert(baseImage);
-      // This uses std::u8string because glTF URIs are UTF-8 encoded, and we
-      // want to communicate that to the fs::path constructor.
-      std::u8string uri     = std::u8string(reinterpret_cast<const char8_t*>(baseImage->uri));
-      auto [index, created] = imagesIndex.try_emplace(std::move(uri), imagesIndex.size());
-      assert(index->second < 256);
-      material.albedoTexture = uint8_t(index->second);
-    }
-    else
-    {
-      material.albedoTexture = -1;
-    }
+    auto loadTexture = [&](const cgltf_texture_view& textureView) -> int8_t {
+      if(textureView.texture)
+      {
+        const cgltf_image* baseImage = textureView.texture->image;
+        assert(baseImage);
+        // This uses std::u8string because glTF URIs are UTF-8 encoded, and we
+        // want to communicate that to the fs::path constructor.
+        std::u8string uri     = std::u8string(reinterpret_cast<const char8_t*>(baseImage->uri));
+        auto [index, created] = imagesIndex.try_emplace(std::move(uri), imagesIndex.size());
+        assert(index->second < 256);
+        return int8_t(index->second);
+      }
+      else
+      {
+        return int8_t(-1);
+      }
+    };
+    material.albedoTexture            = loadTexture(pbr.base_color_texture);
+    material.metallicRoughnessTexture = loadTexture(pbr.metallic_roughness_texture);
     material.roughness = pbr.roughness_factor;
     material.metallic  = pbr.metallic_factor;
     if(material.albedo == glm::vec4(1.0f))  // filter out unnatural 100% albedo
     {
       material.albedo = glm::vec4(0.5f, 0.5f, 0.5f, 1.0f);
     }
+    if(std::string_view(primitive.material->name) == "BunnyMaterial")
+    {
+      material.roughness = 0.5f;
+      material.metallic  = 0.1f;  // Hard code a non-metallic bunny
+    }
   }
-  else
-  {
-    // Default material
-    material.albedo        = {0.41f, 0.27f, 0.14f, 1.0f};
-    material.albedoTexture = -1;
-    material.roughness     = 0.8f;
-    material.metallic      = 0.3f;
-  }
+}
+
+Mesh::Mesh(SimpleMesh&& simpleMesh)
+    : meshTriIndices(std::move(simpleMesh.triangles))
+    , meshPositions(std::move(simpleMesh.positions))
+    , meshNormals(std::move(simpleMesh.normals))
+{
 }
 
 // Utility to extract a subset of a vector by indices
@@ -413,6 +417,7 @@ ClusteredMesh::ClusteredMesh(nvclusterlod_Context context, const Mesh& baseMesh,
     , lodLevelGroups(alloc.createArray(lodMesh.lodMesh.lodLevelGroupRanges))
     , clusterGeneratingGroups(alloc.createArray(lodMesh.lodMesh.clusterGeneratingGroups))
     , groupClusterRanges(alloc.createArray(lodMesh.lodMesh.groupClusterRanges))
+    , aabb(computeBounds(clusteredMesh.meshPositions))
 {
   // Builid bi-directional group dependency tables
   std::vector<offset_span<uint32_t>>  tmpGroupGeneratingGroups;
@@ -475,6 +480,8 @@ ClusterGroupGeometryVk::ClusterGroupGeometryVk(ResourceAllocator*   allocator,
                                                uint32_t             groupIndex,
                                                VkCommandBuffer      transferCmd)
 {
+  vkobj::NvtxRange nvtxRange("ClusterGroupGeometryVk()");
+
   nvcluster_Range clusterRange = mesh.groupClusterRanges[groupIndex];
 
   // Create a staging buffer to pack geometry data. Align to 16 bytes to support
@@ -558,144 +565,276 @@ SceneImage::SceneImage(const Image& image, file_writer& alloc)
 {
 }
 
-SceneFile::SceneFile(const fs::path& gltfPath, const fs::path& cachePath, const SceneLodConfig& lodConfig, bool invalidateCache)
-    : path(gltfPath)
+std::optional<SceneFile> makeSceneFromCache(const fs::path& gltfPath, const fs::path& cachePath)
 {
-  if(!invalidateCache && std::filesystem::is_regular_file(cachePath))
+  std::optional<SceneFile> result;
+  if(std::filesystem::is_regular_file(cachePath))
   {
-    memoryMap.emplace(cachePath);
-    uint32_t version = reinterpret_cast<const Scene*>(memoryMap->data())->version;
+    decodeless::file memoryMap(cachePath);
+    uint32_t         version = reinterpret_cast<const Scene*>(memoryMap.data())->version;
     if(version == SCENE_RENDERCACHE_VERSION)
     {
       LOGI("Using cache: %s\n", cachePath.string().c_str());
+
+      // Track the gltf path so we can reload the scene and regenerate the LOD
+      result.emplace(std::move(memoryMap), gltfPath);
     }
     else
     {
       LOGI("Recreating rendercache %s (version %u, expected %u)\n", cachePath.string().c_str(), version, SCENE_RENDERCACHE_VERSION);
-      memoryMap.reset();
     }
   }
+  return result;
+}
 
-  // Create the render cache if it doesn't exist
-  if(!memoryMap)
-  {
-    Stopwatch stopwatch("Processing " + path.string());
-    fs::path tmpPath = cachePath;
-    tmpPath.replace_extension(".creating");  // temporary output in case we fail/crash
-    file_writer  writer(tmpPath, 100llu << 30 /* 100GB max. virtual address space */);
-    Scene*       newData = writer.create<Scene>();
-    SceneCounts& counts  = newData->counts;
+// Attempts to convert a triangle count to a time-proportional estimate for
+// processing LOD. This equation is computed and printed by TaskProgress.
+inline float processsingWorkEstimate(size_t numTriangles)
+{
+  // Fits linear best: time = 1.8897632e-06 complexity + -0.18205154
+  float result = 1.8897632e-06f * float(numTriangles) - 0.18205154f;
+  // Fits quadratic best: time = 0.16158555 complexity^2 + 0.45325717 complexity + 0.09233217
+  result = 0.16158555f * result * result + 0.45325717f * result + 0.09233217f;
+  return result;
+}
 
-    // TODO: allocate and fill arrays directly in the memory mapping to avoid
-    // the extra allocation and copying memory around
-    std::vector<uint32_t>                     meshGroupOffsets = {0};
-    std::vector<Instance>                     instances;
-    std::vector<ClusteredMesh>                meshes;
-    CgltfModel                                gltfModel(path);
-    std::unordered_map<cgltf_mesh*, uint32_t> meshIndices;
-    std::unordered_map<std::u8string, size_t> imagesIndex;
-    std::vector<std::vector<uint32_t>>        meshPrimitives;
+// Common makeScene*() code. Builds the scene with file mapping. Abstracs source
+// data conversion with callbacks. Computes scene metadata needed for LOD and
+// ray tracing.
+using EmitMeshFunc     = std::function<void(Mesh&&)>;
+using EmitInstanceFunc = std::function<void(Instance&&)>;
+using EmitImageFunc    = std::function<void(Image&&)>;
+using ConvertFunc      = std::function<void(EmitMeshFunc, EmitInstanceFunc, EmitImageFunc)>;
+decodeless::file makeScene(const fs::path& cachePath, const SceneLodConfig& lodConfig, ConvertFunc convertFunc)
+{
+  // Load a scene from a gltf file
+  fs::path tmpPath = cachePath;
+  tmpPath.replace_extension(".creating");  // temporary output in case we fail/crash
+  file_writer  writer(tmpPath, 100llu << 30 /* 100GB max. virtual address space */);
+  Scene*       newData = writer.create<Scene>();
+  SceneCounts& counts  = newData->counts;
 
-    // These don't currently do anything, but are here in case the library does
-    // use them at some point
-    std::unique_ptr<nvcluster_Context_t, void (*)(nvcluster_Context_t*)> nvclusterContext(makeClusterContext(), destroyClusterContext);
-    std::unique_ptr<nvclusterlod_Context_t, void (*)(nvclusterlod_Context_t*)> nvlodContext(
-        makeLodContext(nvclusterContext.get()), destroyLodContext);
-    for(auto [cgltfMesh, transform] : flatSceneInstances(gltfModel.scenes()[0].nodes()))
-    {
-      auto [it, created] = meshIndices.try_emplace(cgltfMesh, uint32_t(meshIndices.size()));
+  // Create clustering contexts
+  std::unique_ptr<nvcluster_Context_t, void (*)(nvcluster_Context_t*)> nvclusterContext(makeClusterContext(), destroyClusterContext);
+  std::unique_ptr<nvclusterlod_Context_t, void (*)(nvclusterlod_Context_t*)> nvlodContext(
+      makeLodContext(nvclusterContext.get()), destroyLodContext);
 
-      // If this is the first reference to this mesh
-      if(created)
-      {
-        // Create the LOD hierarchy
-        meshPrimitives.emplace_back();
-        for(const CgltfPrimitive& primitive : CgltfMesh{*cgltfMesh}.primitives())
+  // TODO: allocate and fill arrays directly in the memory mapping to avoid
+  // the extra allocation and copying memory around
+  std::vector<ClusteredMesh> meshes;
+  std::vector<Instance>      instances;
+  std::vector<Image>         images;
+  std::vector<uint32_t>      meshGroupOffsets{0};  // zero appended, running count is always a step ahead
+  std::vector<uint32_t>      meshInstanceCounts;
+  convertFunc(
+      [&](Mesh&& mesh) {
+        meshes.emplace_back(ClusteredMesh(nvlodContext.get(), std::move(mesh), lodConfig, writer));
+        meshGroupOffsets.push_back(meshGroupOffsets.back() + uint32_t(meshes.back().groupClusterRanges.size()));
+        for(auto& groupClusterRange : meshes.back().groupClusterRanges)
+          counts.maxClustersPerGroup = std::max(counts.maxClustersPerGroup, groupClusterRange.count);
+        counts.maxClustersPerMesh = std::max(counts.maxClustersPerMesh, uint32_t(meshes.back().clusterTriangleRanges.size()));
+        counts.maxLODLevel = std::max(counts.maxLODLevel, uint32_t(meshes.back().lodLevelGroups.size()));
+        counts.totalGroups += uint32_t(meshes.back().groupClusterRanges.size());
+        counts.totalClusters += uint32_t(meshes.back().clusterTriangleRanges.size());
+        for(nvcluster_Range triangleRange : meshes.back().clusterTriangleRanges)
         {
-          LOGI("Creating LOD for mesh %zu\n", meshes.size());
-
-          // Convert gltf to consistent mesh, e.g. uint32_t triangle indices
-          meshPrimitives.back().push_back(uint32_t(meshes.size()));
-          meshes.emplace_back(nvlodContext.get(), Mesh(primitive, imagesIndex), lodConfig, writer);
-          meshGroupOffsets.push_back((meshGroupOffsets.empty() ? 0 : meshGroupOffsets.back())
-                                     + uint32_t(meshes.back().hierarchy.groupCumulativeBoundingSpheres.size()));
-          for(auto& groupClusterRange : meshes.back().groupClusterRanges)
-            counts.maxClustersPerGroup = std::max(counts.maxClustersPerGroup, groupClusterRange.count);
-          counts.maxClustersPerMesh = std::max(counts.maxClustersPerMesh, uint32_t(meshes.back().clusterTriangleRanges.size()));
-          counts.maxLODLevel = std::max(counts.maxLODLevel, uint32_t(meshes.back().lodLevelGroups.size()));
-          counts.totalGroups += uint32_t(meshes.back().groupClusterRanges.size());
-          counts.totalClusters += uint32_t(meshes.back().clusterTriangleRanges.size());
-          for(nvcluster_Range triangleRange : meshes.back().clusterTriangleRanges)
-          {
-            counts.maxClusterTriangleCount = std::max(counts.maxClusterTriangleCount, triangleRange.count);
-            counts.totalTriangles += triangleRange.count;
-          }
-          for(nvcluster_Range vertexRange : meshes.back().clusterVertexRanges)
-          {
-            counts.maxClusterVertexCount = std::max(counts.maxClusterVertexCount, vertexRange.count);
-            counts.totalVertices += vertexRange.count;
-          }
-
-          meshes.back().aabb = AABB::empty();
-          for(auto& position : meshes.back().clusteredMesh.meshPositions)
-            meshes.back().aabb += AABB(position, position);
+          counts.maxClusterTriangleCount = std::max(counts.maxClusterTriangleCount, triangleRange.count);
+          counts.totalTriangles += triangleRange.count;
         }
-      }
+        for(nvcluster_Range vertexRange : meshes.back().clusterVertexRanges)
+        {
+          counts.maxClusterVertexCount = std::max(counts.maxClusterVertexCount, vertexRange.count);
+          counts.totalVertices += vertexRange.count;
+        }
+        // Comupte the max. clusters for just LOD0 (highest detail). Technically more
+        // clusters could be rendered if we got really unlucky with mesh decimation
+        // and re-grouping.
+        uint32_t lod0ClusterCount = 0;
+        for(size_t groupIndex : indices(meshes.back().lodLevelGroups.front()))
+        {
+          lod0ClusterCount += meshes.back().groupClusterRanges[groupIndex].count;
+        }
+        counts.maxLod0ClustersPerMesh = std::max(counts.maxLod0ClustersPerMesh, lod0ClusterCount);
+      },
+      [&](Instance&& instance) {
+        instances.push_back(instance);
+        counts.maxTotalInstanceClusters += uint32_t(meshes[instance.meshIndex].clusterTriangleRanges.size());
+        counts.maxTotalInstanceNodes += uint32_t(meshes[instance.meshIndex].hierarchy.nodes.size());
 
-      // Add an instance
-      float uniformScale = std::max(glm::length(transform[0]), std::max(glm::length(transform[1]), glm::length(transform[2])));
-      for(uint32_t meshPrimitiveMesh : meshPrimitives[it->second])
-        instances.push_back({transform, meshPrimitiveMesh, uniformScale});
-      counts.maxTotalInstanceClusters += uint32_t(meshes[it->second].clusterTriangleRanges.size());
-      counts.maxTotalInstanceNodes += uint32_t(meshes[it->second].hierarchy.nodes.size());
-    }
+        // Record per-mesh instances for conservative memory allocation
+        if(meshInstanceCounts.size() <= instance.meshIndex)
+          meshInstanceCounts.resize(std::max(meshes.size(), size_t(instance.meshIndex + 1)), 0);
+        meshInstanceCounts[instance.meshIndex]++;
 
-    if(meshes.empty() || instances.empty())
-      throw std::runtime_error("scene is empty");
+        // Accumulate the world AABB. This is initialized to empty() in the Scene
+        // constructor.
+        newData->worldAABB += transform(instance.transform, meshes[instance.meshIndex].aabb);
+      },
+      [&](Image&& image) { images.push_back(std::move(image)); });
 
-    // Per-instance processing
-    newData->worldAABB = AABB::empty();
-    std::vector<uint32_t> meshInstanceCounts(meshes.size(), 0);
-    for(const Instance& instance : instances)
-    {
-      // Record per-mesh instances for conservative memory allocation
-      meshInstanceCounts[instance.meshIndex]++;
+  if(meshes.empty() || instances.empty())
+    throw std::runtime_error("scene is empty");
 
-      // Compute the world AABB
-      newData->worldAABB += transform(instance.transform, meshes[instance.meshIndex].aabb);
-    }
+  if(counts.totalGroups != meshGroupOffsets.back())
+    throw std::runtime_error("scene total group count mismatch");
 
-    // Write everything to the render cache file
-    counts.totalMeshes          = uint32_t(meshes.size());
-    counts.totalInstances       = uint32_t(instances.size());
-    newData->meshes             = writer.createArray(meshes);
-    newData->instances          = writer.createArray(instances);
-    newData->meshGroupOffsets   = writer.createArray(meshGroupOffsets);
-    newData->meshInstanceCounts = writer.createArray(meshInstanceCounts);
-    newData->images             = writer.createArray<SceneImage>(imagesIndex.size());
-    for(auto& [uri, index] : imagesIndex)
-    {
-      // TODO: handle srgb override from gltf
-      std::optional<Image> image = createImage(path.parent_path() / fs::path(uri), false /* srgb */);
-      if(image)
-        newData->images[index] = SceneImage(*image, writer);
-    }
+  // Write everything to the render cache file
+  counts.maxInstancesPerMesh  = *std::max_element(meshInstanceCounts.begin(), meshInstanceCounts.end());
+  counts.totalMeshes          = uint32_t(meshes.size());
+  counts.totalInstances       = uint32_t(instances.size());
+  newData->meshes             = writer.createArray(meshes);
+  newData->instances          = writer.createArray(instances);
+  newData->meshGroupOffsets   = writer.createArray(meshGroupOffsets);
+  newData->meshInstanceCounts = writer.createArray(meshInstanceCounts);
+  newData->images             = writer.createArray<SceneImage>(images.size());
+  std::ranges::transform(images, newData->images.begin(), [&writer](const Image& img) { return SceneImage(img, writer); });
 
-    newData->version = SCENE_RENDERCACHE_VERSION;
-
-    // Destroy writer in the current scope to save more {...} indentation
-    file_writer(std::move(writer));
-
-    // Finished writing. Rename to the final filename
-    fs::remove(cachePath);  // Because windows errors out if the target exists
-    fs::rename(tmpPath, cachePath);
+  // Compute the maximum object space distance of the world AABB diagonal. This
+  // is used to compute distance in UNORM32 for traversal that works for scenes
+  // of many scales.
+  float worldDiagonal                    = glm::length(newData->worldAABB.max - newData->worldAABB.min);
+  newData->maxWorldDiagonalInObjectSpace = 0.0f;
+  for(const Instance& instance : instances)
+  {
+    float minScale = std::min({
+        glm::length(glm::vec3(instance.transform[0])),
+        glm::length(glm::vec3(instance.transform[1])),
+        glm::length(glm::vec3(instance.transform[2])),
+    });
+    if(minScale < 1e-10f)
+      continue;
+    newData->maxWorldDiagonalInObjectSpace = std::max(newData->maxWorldDiagonalInObjectSpace, worldDiagonal / minScale);
   }
+  if(newData->maxWorldDiagonalInObjectSpace == 0.0f)
+    throw std::runtime_error("failed to compute a conservative instance size for traversal");
 
-  // Reload the render cache if it was just created
-  if(!memoryMap)
-    memoryMap.emplace(cachePath);
-  data = reinterpret_cast<const Scene*>(memoryMap->data());
+  newData->version = SCENE_RENDERCACHE_VERSION;
 
+  // Destroy writer in the current scope to save more {...} indentation
+  file_writer(std::move(writer));
+
+  // Finished writing. Rename to the final filename
+  fs::remove(cachePath);  // Because windows errors out if the target exists
+  fs::rename(tmpPath, cachePath);
+
+  return decodeless::file(cachePath);
+}
+
+SceneFile makeSceneFromGltf(const fs::path& gltfPath, const fs::path& cachePath, const SceneLodConfig& lodConfig, TaskProgress& progress)
+{
+  Stopwatch stopwatch("Processing " + gltfPath.string());
+
+  return SceneFile(
+      makeScene(cachePath, lodConfig,
+                [&](EmitMeshFunc emitMesh, EmitInstanceFunc emitInstance, EmitImageFunc emitImage) {
+                  CgltfModel                                gltfModel(gltfPath);
+                  std::unordered_map<cgltf_mesh*, uint32_t> meshIndices;
+                  std::unordered_map<std::u8string, size_t> imagesIndex;
+                  std::vector<std::vector<uint32_t>>        meshPrimitives;
+
+                  // Estimate how long this will take based on the number of triangles
+                  size_t totalUniqueMeshes = 0;
+                  {
+                    float                           totalWork = 0;
+                    std::unordered_set<cgltf_mesh*> uniqueMeshes;
+                    for(auto [cgltfMesh, transform] : flatSceneInstances(gltfModel.scenes()[0].nodes()))
+                    {
+                      if(uniqueMeshes.insert(cgltfMesh).second)
+                        for(const CgltfPrimitive& primitive : CgltfMesh{*cgltfMesh}.primitives())
+                          totalWork += processsingWorkEstimate(primitive.triangleCount());
+                    }
+                    totalUniqueMeshes = uniqueMeshes.size();
+                    progress.startSubtask(totalWork);
+                  }
+
+                  uint32_t meshesEmittedSoFar = 0;
+                  for(auto [cgltfMesh, transform] : flatSceneInstances(gltfModel.scenes()[0].nodes()))
+                  {
+                    auto [it, created] = meshIndices.try_emplace(cgltfMesh, uint32_t(meshIndices.size()));
+
+                    // If this is the first reference to this mesh
+                    if(created)
+                    {
+                      // Create the LOD hierarchy
+                      meshPrimitives.emplace_back();
+                      for(const CgltfPrimitive& primitive : CgltfMesh{*cgltfMesh}.primitives())
+                      {
+                        LOGI("Creating LOD for mesh %u (%zu triangles)\n", meshesEmittedSoFar + 1, primitive.triangleCount());
+                        progress.setSubtaskWorkName(fmt::format("mesh {}/{}", meshesEmittedSoFar + 1, totalUniqueMeshes));
+
+                        // Convert gltf to consistent mesh, e.g. uint32_t triangle indices
+                        meshPrimitives.back().push_back(meshesEmittedSoFar);
+                        emitMesh(Mesh(primitive, imagesIndex));
+                        meshesEmittedSoFar++;
+                        progress.makeProgress(processsingWorkEstimate(primitive.triangleCount()));
+                      }
+                    }
+
+                    // Add an instance
+                    float uniformScale =
+                        std::max(glm::length(transform[0]), std::max(glm::length(transform[1]), glm::length(transform[2])));
+                    for(uint32_t meshPrimitiveMesh : meshPrimitives[it->second])
+                      emitInstance(Instance{transform, glm::inverse(transform), meshPrimitiveMesh, uniformScale});
+                  }
+
+                  // Emit images in index order
+                  std::vector<std::u8string> imagesToLoad(imagesIndex.size());
+                  for(auto& [uri, index] : imagesIndex)
+                    imagesToLoad[index] = std::move(uri);
+                  imagesIndex.clear();
+                  for(const auto& uri : imagesToLoad)
+                  {
+                    // TODO: handle srgb override from gltf
+                    std::optional<Image> image = createImage(gltfPath.parent_path() / fs::path(uri), false /* srgb */);
+                    if(image)
+                      emitImage(std::move(*image));
+                  }
+                }),
+      gltfPath);
+}
+
+SceneFile makeSceneFromGenerated(GeneratedScene&& generatedScene, const fs::path& cachePath, const SceneLodConfig& lodConfig, TaskProgress& progress)
+{
+  Stopwatch stopwatch("Generating " + cachePath.string());
+
+  return SceneFile(makeScene(cachePath, lodConfig, [&generatedScene, &progress](EmitMeshFunc emitMesh, EmitInstanceFunc emitInstance, EmitImageFunc) {
+    // Estimate how long this will take based on the number of triangles
+    float totalWork = 0;
+    for(const auto& mesh : generatedScene.meshes)
+      totalWork += processsingWorkEstimate(mesh.triangles.size());
+    progress.startSubtask(totalWork);
+
+    uint32_t processingMeshIndex = 0;
+    for(auto& mesh : generatedScene.meshes)
+    {
+      float workEstimate = processsingWorkEstimate(mesh.triangles.size());
+      ++processingMeshIndex;
+      LOGI("Creating LOD for mesh %u (%zu triangles)\n", processingMeshIndex, mesh.triangles.size());
+      progress.setSubtaskWorkName(fmt::format("mesh {}/{}", processingMeshIndex, generatedScene.meshes.size()));
+
+      emitMesh(Mesh(std::move(mesh)));
+      progress.makeProgress(workEstimate);
+    }
+
+    for(const auto& [meshIndex, transform] : generatedScene.instances)
+    {
+      float uniformScale = std::max({
+          glm::length(glm::vec3(transform[0])),
+          glm::length(glm::vec3(transform[1])),
+          glm::length(glm::vec3(transform[2])),
+      });
+      emitInstance(Instance{transform, glm::inverse(transform), meshIndex, uniformScale});
+    }
+
+    // No images for generated scenes
+  }));
+}
+
+SceneFile::SceneFile(decodeless::file&& memoryMap, const fs::path& path)
+    : data(reinterpret_cast<const Scene*>(memoryMap.data()))
+    , path(path)
+    , memoryMap(std::move(memoryMap))
+{
   if(data->version != SCENE_RENDERCACHE_VERSION)
     throw std::runtime_error("unknown rendercache version " + std::to_string(data->version) + ", expected "
                              + std::to_string(SCENE_RENDERCACHE_VERSION));
@@ -709,6 +848,9 @@ SceneFile::SceneFile(const fs::path& gltfPath, const fs::path& cachePath, const 
 
   if(data->counts.maxClustersPerGroup == 0)
     throw std::runtime_error("max clusters per mesh is zero");
+
+  if(data->meshGroupOffsets.empty() || data->meshGroupOffsets.back() != data->counts.totalGroups)
+    throw std::runtime_error("corrupt meshGroupOffsets");
 
   uint32_t totalLod0Triangles = 0;
   for(auto& mesh : data->meshes)
@@ -755,6 +897,7 @@ SceneVK::SceneVK(ResourceAllocator* allocator, const Scene& scene, VkCommandPool
                           scene.counts.totalGroups,
                           VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                           VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+    , staticDeviceMemoryUsage(instances.size_bytes() + allGroupNeededFlags.size_bytes())
 {
   // A command buffer to transfer scene data to the GPU. This is periodically
   // submitted when staging memory is full
@@ -779,6 +922,7 @@ SceneVK::SceneVK(ResourceAllocator* allocator, const Scene& scene, VkCommandPool
   {
     // Separate uploads to avoid creating too many staging buffers
     clusteredMeshes.emplace_back(allocator, clusteredMesh, transferCmd);
+    staticDeviceMemoryUsage += clusteredMeshes.back().deviceMemoryUsage();
     flushStagingWhenNeeded();
   }
 
@@ -810,9 +954,9 @@ SceneVK::SceneVK(ResourceAllocator* allocator, const Scene& scene, VkCommandPool
     // easier to filter out textures that failed to load. The above filtering
     // breaks image indices so they need to be translated.
     // TODO: load and validate images before storing the original index
-    shaders::Material material = clusteredMesh.clusteredMesh.material;
-    assert(imageReindex.count(material.albedoTexture));
-    material.albedoTexture = imageReindex[material.albedoTexture];
+    shaders::Material material        = clusteredMesh.clusteredMesh.material;
+    material.albedoTexture            = imageReindex.at(material.albedoTexture);
+    material.metallicRoughnessTexture = imageReindex.at(material.metallicRoughnessTexture);
 
     vkobj::DeviceAddress<uint8_t> meshGroupNeededFlagsAddress(VkDeviceAddress(allGroupNeededFlags.address())
                                                               + sizeof(uint8_t) * scene.meshGroupOffsets[i]);
@@ -826,12 +970,14 @@ SceneVK::SceneVK(ResourceAllocator* allocator, const Scene& scene, VkCommandPool
         .material                    = material,
         .groupCount                  = uint32_t(clusteredMeshVk.groupQuadricErrors.size()),
         .residentClusterCount        = 0,
+        .instanceCount               = scene.meshInstanceCounts[i],
     });
   }
   {
     meshPointers = vkobj::Buffer(allocator, meshPointersBuilder,
                                  VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                                  VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, transferCmd);
+    staticDeviceMemoryUsage += meshPointers.size_bytes();
 
     // A single barrier at the end of uploading the scene to make sure it's
     // visible to anything reading it
@@ -855,7 +1001,7 @@ void SceneVK::cmdResetStreaming(ResourceAllocator* allocator, const Scene& scene
   }
 
   // Mark the last group in each mesh as needed and a root node
-  std::span<uint8_t> groupNeededFlagsHost = cmdToArray(*allocator->getStaging(), cmd, allGroupNeededFlags);
+  std::span<uint8_t> groupNeededFlagsHost = cmdStagedUpload(*allocator->getStaging(), cmd, allGroupNeededFlags);
   std::ranges::fill(groupNeededFlagsHost, uint8_t(0));
   for(size_t meshIndex = 0; meshIndex < scene.meshes.size(); ++meshIndex)
   {

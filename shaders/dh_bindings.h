@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2022-2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2022-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -21,10 +21,19 @@
 #ifndef BINDINGS_H
 #define BINDINGS_H
 
-const int BRtTlas      = 0;
-const int BRtOutImage  = 1;
-const int BRtFrameInfo = 2;
-const int BRtSkyParam  = 4;
-const int BRtTextures  = 5;
+// Descriptor set index for raytracing pipeline
+const int DSRt = 0;
+
+const int BRtTlas                   = 0;
+const int BRtOutBaseColor_Metalness = 1;
+const int BRtOutSpecAlbedo          = 2;
+const int BRtOutSpecHitDist         = 3;
+const int BRtOutNormalRoughness     = 4;
+const int BRtOutMotionVectors       = 5;
+const int BRtOutViewZ               = 6;
+const int BRtOutColor               = 7;
+const int BRtFrameInfo              = 8;
+const int BRtSkyParam               = 9;
+const int BRtTextures               = 10;
 
 #endif  // !BINDINGS_H

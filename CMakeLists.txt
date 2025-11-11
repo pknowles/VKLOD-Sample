@@ -50,6 +50,10 @@ set(SOURCE_FILES
   src/scene.hpp
   src/nvhiz_vk.cpp
   src/nvhiz_vk.hpp
+  src/generate_mesh.cpp
+  src/generate_mesh.hpp
+  src/mesh_util.hpp
+  src/sample_dlss_objects.hpp
   )
 
 file(GLOB GLSL_FILES shaders/*.*)
@@ -81,6 +85,9 @@ _add_project_definitions(${SAMPLE_EXECUTABLE})
 
 file(RELATIVE_PATH NVPRO_CORE_DIR ${CMAKE_CURRENT_SOURCE_DIR} ${BASE_DIRECTORY}/nvpro_core/)
 
+# Enable NVTX markers for nsight systems profiling
+set(SUPPORT_NVTOOLSEXT ON)
+
 # Turn on extra nvpro_core features (the same lib can be referenced with
 # multiple configurations). Some _add_package_*() nvpro_core specializations
 # alter the implementation, in which case samples are requested to compile extra
@@ -90,8 +97,12 @@ file(RELATIVE_PATH NVPRO_CORE_DIR ${CMAKE_CURRENT_SOURCE_DIR} ${BASE_DIRECTORY}/
 _add_package_VulkanSDK()
 _add_package_ShaderC()
 _add_package_ImGUI()
-_add_package_NVML()
+_add_package_NVToolsExt()
 _add_nvpro_core_lib()
+
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/cmake")
+set(DLSS_VERSION "310.4.0")
+find_package(NGX REQUIRED)
 
 add_subdirectory(nv_cluster_lod_builder)
 
@@ -99,9 +110,11 @@ add_library(vma_static src/vma_impl.cpp)
 target_link_libraries(vma_static PUBLIC vma)  # nvpro_core exports header-only 'vma'
 set_property(TARGET vma_static PROPERTY FOLDER "ThirdParty")
 
-add_library(cgltf_static src/cgltf_impl.cpp)
-target_link_libraries(cgltf_static PUBLIC cgltf)  # nvpro_core exports header-only 'cgltf'
-set_property(TARGET cgltf_static PROPERTY FOLDER "ThirdParty")
+if(NOT TARGET cgltf_static)
+  add_library(cgltf_static src/cgltf_impl.cpp)
+  target_link_libraries(cgltf_static PUBLIC cgltf)  # nvpro_core exports header-only 'cgltf'
+  set_property(TARGET cgltf_static PROPERTY FOLDER "ThirdParty")
+endif()
 
 add_library(stb_image_static src/stb_image_impl.cpp)
 target_link_libraries(stb_image_static PUBLIC stb)  # nvpro_core exports header-only 'stb'
@@ -171,7 +184,8 @@ else()
     # Ignore warnings from nvpro_core headers
     target_include_directories(${SAMPLE_EXECUTABLE} SYSTEM PRIVATE
       ${NVPRO_CORE_DIR}
-      ${NVPRO_CORE_DIR}/third_party/glm)
+      ${NVPRO_CORE_DIR}/third_party/glm
+      ${Vulkan_INCLUDE_DIR})
 
     if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
         # for when you write too much code without building
@@ -186,6 +200,21 @@ else()
         endif()
     endif()
 endif()
+
+# Compute relative paths to DLSS dynamic libraries with variables from
+# FindNGX.cmake
+list(GET DLSS_DLLS 0 _DLSS_FIRST_DLL)
+get_filename_component(_DLSS_LIB_DIR "${_DLSS_FIRST_DLL}" DIRECTORY)
+file(RELATIVE_PATH DLSS_RELPATH_FROM_SOURCE "${CMAKE_SOURCE_DIR}" "${_DLSS_LIB_DIR}")
+# nvpro_core modifies RUNTIME_OUTPUT_DIRECTORY, which includes a generator expression
+#file(RELATIVE_PATH DLSS_RELPATH_FROM_BINARY "${CMAKE_BINARY_DIR}" "${_DLSS_LIB_DIR}")
+file(RELATIVE_PATH DLSS_RELPATH_FROM_BINARY "${OUTPUT_PATH}/ConfigSubpath" "${_DLSS_LIB_DIR}")
+target_compile_definitions(${SAMPLE_EXECUTABLE} PRIVATE 
+  DLSS_RELPATH_FROM_INSTALL="."
+  # Workaround for DLSS_USE_DEVELOP_LIBRARIES. Use dev for Debug builds, rel for others
+  DLSS_RELPATH_FROM_SOURCE="${DLSS_RELPATH_FROM_SOURCE}/../$<IF:$<CONFIG:Debug>,dev,rel>"
+  DLSS_RELPATH_FROM_BINARY="${DLSS_RELPATH_FROM_BINARY}/../$<IF:$<CONFIG:Debug>,dev,rel>"
+  )
 
 target_precompile_headers(${SAMPLE_EXECUTABLE} PRIVATE
   <algorithm>
@@ -262,12 +291,22 @@ FetchContent_MakeAvailable(decodeless_offset_ptr)
 FetchContent_Declare(
   decodeless_writer
   GIT_REPOSITORY https://github.com/decodeless/writer.git
-  GIT_TAG e1626714146a8b7f7b9157bc1dbb3f339689e589)
+  GIT_TAG 6f9b747d7671afe2c7abd1d48c9d084402aec1d8)
 FetchContent_MakeAvailable(decodeless_writer)
 
 target_include_directories(${SAMPLE_EXECUTABLE} PRIVATE src)
 
-target_link_libraries(${SAMPLE_EXECUTABLE} nvpro_core nvpro_core_extra vma_static nv_cluster_lod_builder cgltf_static stb_image_static ${PLATFORM_LIBRARIES} decodeless::writer decodeless::offset_ptr)
+target_link_libraries(${SAMPLE_EXECUTABLE}
+  nvpro_core
+  nvpro_core_extra
+  vma_static
+  nv_cluster_lod_builder
+  cgltf_static
+  stb_image_static
+  ${PLATFORM_LIBRARIES}
+  decodeless::writer
+  decodeless::offset_ptr
+  ngx)
 target_link_libraries(${SAMPLE_EXECUTABLE} debug ${LIBRARIES_DEBUG})
 target_link_libraries(${SAMPLE_EXECUTABLE} optimized ${LIBRARIES_OPTIMIZED})
 
@@ -291,6 +330,8 @@ install(FILES ${GLSL_FILES} CONFIGURATIONS Release DESTINATION "bin_${ARCH}/GLSL
 install(FILES ${GLSL_FILES} CONFIGURATIONS Debug DESTINATION "bin_${ARCH}_debug/GLSL_${SAMPLE_EXECUTABLE}")
 install(FILES ${NVPRO_CORE_GLSL_FILES} CONFIGURATIONS Release DESTINATION "bin_${ARCH}/GLSL_${SAMPLE_EXECUTABLE}/nvvkhl/shaders")
 install(FILES ${NVPRO_CORE_GLSL_FILES} CONFIGURATIONS Debug DESTINATION "bin_${ARCH}_debug/GLSL_${SAMPLE_EXECUTABLE}/nvvkhl/shaders")
+install(FILES ${DLSS_DLLS} CONFIGURATIONS Release DESTINATION "bin_${ARCH}")
+install(FILES ${DLSS_DLLS} CONFIGURATIONS Debug DESTINATION "bin_${ARCH}_debug")
 
 # Debug in the source directory to avoid having a set of relative shader include
 # paths just for debugging with visual studio

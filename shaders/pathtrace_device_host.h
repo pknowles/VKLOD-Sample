@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2022-2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2022-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -22,7 +22,21 @@
 #include "shaders_glm.h"
 #include "shaders_scene.h"
 
-#define PATHTRACE_MAX_RECURSION_DEPTH 4
+// The maximum real traceRayEXT() recursion that we need from vulkan. We only
+// need two: closest hit + shadow ray
+#define PATHTRACE_MAX_VK_RECURSION_DEPTH 2
+
+// The limit we choose in the raygen shader to limit the monte carlo path size
+#define PATHTRACE_MAX_RGEN_RECURSION_DEPTH 6
+
+// G-Buffer indices for DLSS-RR guides
+const int eGBufBaseColor_Metalness = 0;
+const int eGBufSpecAlbedo          = 1;
+const int eGBufSpecHitDist         = 2;
+const int eGBufNormalRoughness     = 3;
+const int eGBufMotionVectors       = 4;
+const int eGBufViewZ               = 5;
+const int eGBufColor               = 6;
 
 #ifdef __cplusplus
 namespace shaders {
@@ -36,6 +50,8 @@ struct PathtraceConfig
   int32_t maxDepth;
   float   aoRadius;
   int32_t pathtrace;
+  float   fogHeightOffset;
+  float   fogDensity;
 };
 
 struct PathtraceConstant
@@ -45,6 +61,8 @@ struct PathtraceConstant
   PathtraceConfig config;
   uint32_t        frame;
   float           errorOverDistanceThreshold;
+  vec2            jitter;
+  int32_t         dlssEnabled;
 };
 
 #ifdef __cplusplus

@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -58,20 +58,50 @@ void main()
 
   // DANGER: assuming the first child is LOD0 root - in practice it was when written.
   // Ideally, there would be a more reliable mechanism to get the mesh's bounding sphere.
-  Node lod0Root       = nodes.array[rootChilren.childOffset + 0];
-  vec4 instanceSphere = vec4(lod0Root.bsx, lod0Root.bsy, lod0Root.bsz, lod0Root.bsw);
+  Node lod0Root   = nodes.array[rootChilren.childOffset + 0];
+  vec4 lod0Sphere = vec4(lod0Root.bsx, lod0Root.bsy, lod0Root.bsz, lod0Root.bsw);
 
-  mat4  transform = pc.traversalParams.viewTransform * instance.transform;
-  vec3  spherePos = vec3(transform * vec4(instanceSphere.xyz, 1.0));
-  float distance  = max(0.0, length(spherePos) - instanceSphere.w * instance.uniformScale);
+  vec3  cameraInObjectSpace = vec3(instance.transformInv * vec4(pc.traversalParams.viewPosition, 1.0));
+  float distance            = length(cameraInObjectSpace - lod0Sphere.xyz);
 
   // Bubble sort into list of instances to traverse using a 64bit atomicMin
   SortingMeshInstancesArray sortingMeshInstances = SortingMeshInstancesArray(pc.sortingMeshInstances);
   uint32_t                  key                  = uint32_t(distance * pc.traversalParams.distanceToUNorm32);
   uint64_t                  keyValue             = (uint64_t(key) << 32) | instanceId;
-  if(keyValue < sortingMeshInstances.array[instance.meshIndex].nearest[TRAVERSAL_NEAREST_INSTANCE_COUNT - 1])
+
+  // All threads load their mesh's nearest array into local cache
+  // No branching ensures uniform execution and avoids dependent loads in the search
+  uint64_t cachedNearest[TRAVERSAL_NEAREST_INSTANCE_COUNT];
+  for(uint32_t i = 0; i < TRAVERSAL_NEAREST_INSTANCE_COUNT; ++i)
   {
-    for(uint32_t i = 0; i < TRAVERSAL_NEAREST_INSTANCE_COUNT; ++i)
+    cachedNearest[i] = sortingMeshInstances.array[instance.meshIndex].nearest[i];
+  }
+
+  // Search for insertion position (implicitly checks if keyValue < worstValue)
+  // If no valid position found, startIdx will be TRAVERSAL_NEAREST_INSTANCE_COUNT
+  uint32_t startIdx = TRAVERSAL_NEAREST_INSTANCE_COUNT;
+  for(uint32_t i = 0; i < TRAVERSAL_NEAREST_INSTANCE_COUNT; ++i)
+  {
+    // Would be nice to filter out instances based on pointInLimacon(), but this
+    // would be a non-commutative operation that would break sorting, introduce
+    // temporal instability and wrong results. Consider an instance that is
+    // filtered out because it's outside the limacon of an existing instance.
+    // Then the existing instance is replaced with a closer one, but the closer
+    // one's limacon may not exclude those already filtered out.
+    // TODO: this would be possible with greedy selection, but that would
+    // require multiple passes of all instances. Might be worth trying.
+    if(keyValue < cachedNearest[i])
+    {
+      startIdx = i;
+      break;
+    }
+  }
+
+  // Atomic bubble sort only if a valid insertion position was found
+  // Starting from the found position reduces average atomic operations
+  if(startIdx < TRAVERSAL_NEAREST_INSTANCE_COUNT)
+  {
+    for(uint32_t i = startIdx; i < TRAVERSAL_NEAREST_INSTANCE_COUNT; ++i)
     {
       uint64_t old = atomicMin(sortingMeshInstances.array[instance.meshIndex].nearest[i], keyValue);
       if(old >= keyValue)

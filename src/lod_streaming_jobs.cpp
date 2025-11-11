@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -138,8 +138,8 @@ shaders::StreamGroupModsList GroupModsList::write(ResourceAllocator*            
   // Write the LoadGroup and UnloadGroup arrays that contain references to
   // streamed data that must be added or removed
   nvvk::StagingMemoryManager* smm = allocator->getStaging();
-  cmdToArray(*smm, cmd, loads, m_loads);
-  cmdToArray(*smm, cmd, unloads, m_unloads);
+  cmdStagedUpload(*smm, cmd, loads, m_loads);
+  cmdStagedUpload(*smm, cmd, unloads, m_unloads);
 
   // Record running totals of what was loaded and unloaded. This may be used to
   // determine worst case allocations needed
@@ -224,6 +224,9 @@ void GroupModsList::modifyGroups(ModifyGroupsProgram&          program,
 
 void RequestDependencyPipeline::queueRequests(std::span<const shaders::GroupRequest> requests)
 {
+  if(requests.empty())
+    return;
+
   // Keep track of the most recent state at the back of the queue so short
   // pulses can be ignored
   for(const shaders::GroupRequest& request : requests)
@@ -238,6 +241,9 @@ void RequestDependencyPipeline::queueRequests(std::span<const shaders::GroupRequ
   // Add all the requests to the main queue. This is allowed to grow
   // indefinitely
   m_topLevelRequests.insert(m_topLevelRequests.end(), requests.begin(), requests.end());
+
+  if(!m_delayedRequests.empty())
+    m_useDelayedRequests = true;
 }
 
 void RequestDependencyPipeline::dequeueLoadUnloadBatch(const Scene&                                     scene,
@@ -245,8 +251,17 @@ void RequestDependencyPipeline::dequeueLoadUnloadBatch(const Scene&             
                                                        const std::function<Result(uint32_t, uint32_t)>& emitUnload)
 {
   m_batchUnloads.clear();
-  while(!m_topLevelRequests.empty())
+  while(!m_topLevelRequests.empty() || (m_useDelayedRequests && !m_delayedRequests.empty()))
   {
+    if(m_topLevelRequests.empty())
+    {
+      assert(m_useDelayedRequests && !m_delayedRequests.empty());
+      m_topLevelRequests.insert(m_topLevelRequests.end(), m_delayedRequests.begin(), m_delayedRequests.end());
+      m_delayedRequests.clear();
+      m_useDelayedRequests = false;
+      assert(!m_topLevelRequests.empty());
+    }
+
     // Get the next top level request, but don't consume it just yet
     shaders::GroupRequest request = m_topLevelRequests.front();
 
@@ -280,8 +295,9 @@ void RequestDependencyPipeline::dequeueLoadUnloadBatch(const Scene&             
                                               meshGroupIndex, emitLoad);
 
       // Pin the page to prevent automatically unloading it due to a lost
-      // dependency. This is still done even for Result::eSkip.
-      m_globalGroupsNeeded[request.decoded.globalGroup] = true;
+      // dependency.
+      if(result != Result::eDelay)
+        m_globalGroupsNeeded[request.decoded.globalGroup] = true;
     }
     else
     {
@@ -289,12 +305,17 @@ void RequestDependencyPipeline::dequeueLoadUnloadBatch(const Scene&             
       m_globalGroupsNeeded[request.decoded.globalGroup] = false;
       result = unloadGroupDependenciesRecursive(scene.meshes[meshIndex].groupGeneratedGroups, scene.meshes[meshIndex].groupGeneratingGroups,
                                                 meshGroupOffset, meshIndex, meshGroupIndex, emitUnload);
+      if(result == Result::eDelay)
+        m_globalGroupsNeeded[request.decoded.globalGroup] = true;  // restore the pin as it wasn't unloaded and we'll try again later
     }
 
-    if(result == Result::eSuccess || result == Result::eSkip)
+    if(result == Result::eSuccess || result == Result::eDelay)
     {
       m_topLevelRequests.pop_front();
-      --m_pendingRequests;
+      if(result == Result::eDelay)
+        m_delayedRequests.push_back(request);
+      else
+        --m_pendingRequests;
     }
     else
     {

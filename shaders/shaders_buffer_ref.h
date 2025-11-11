@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -60,15 +60,19 @@ DECL_BUFFER_REF(Vec3Array, vec3);
 DECL_BUFFER_REF(Vec4Array, vec4);
 DECL_BUFFER_REF(UVec2Array, uvec2);
 DECL_BUFFER_REF(UVec3Array, uvec3);
+DECL_BUFFER_REF(U8Vec2Array, u8vec2);
 DECL_BUFFER_REF(U8Vec3Array, u8vec3);
 DECL_BUFFER_REF(UVec4Array, uvec4);
 DECL_BUFFER_REF(Uint8Array, uint8_t);
+DECL_BUFFER_REF(Uint16Array, uint16_t);
 DECL_BUFFER_REF(UintArray, uint32_t);
 DECL_BUFFER_REF(Uint32Array, uint32_t);
 DECL_BUFFER_REF(Uint64Array, uint64_t);
 DECL_MUTABLE_BUFFER_REF(MutUintArray, uint32_t);
 DECL_MUTABLE_BUFFER_REF(MutUint32Array, uint32_t);
 DECL_MUTABLE_BUFFER_REF(MutUint64Array, uint64_t);
+DECL_MUTABLE_BUFFER_REF(MutUVec3Array, uvec3);
+DECL_MUTABLE_BUFFER_REF(MutVec3Array, vec3);
 
 #ifdef __cplusplus
 }  // namespace shaders

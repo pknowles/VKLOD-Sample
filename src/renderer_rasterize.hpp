@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -45,9 +45,12 @@ public:
                     Framebuffer&          framebuffer);
 
 
-  virtual void updatedFrambuffer(ResourceAllocator* allocator, Framebuffer& framebuffer) override;
+  virtual void         updatedFrambuffer(const RenderParams& params) override;
   virtual void render(const RenderParams& params, const SceneVK& sceneVk, VkCommandBuffer cmd) override;
-  virtual void ui(bool& recreateRenderer, bool& resetFrameAccumulation) override;
+  virtual void         uiOverlay() override;
+  virtual void         uiInline(bool&, bool&) override {}
+  virtual void         uiSection(bool& recreateRenderer, bool& resetFrameAccumulation) override;
+  virtual VkDeviceSize deviceMemoryUsage() const override { return 0; }
   virtual bool requiresCLAS() const override { return false; }
 
 private:

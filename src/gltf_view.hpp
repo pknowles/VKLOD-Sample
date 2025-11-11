@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: LicenseRef-NvidiaProprietary
  *
  * NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
@@ -213,6 +213,13 @@ public:
   {
     return CgltfAccessor<T>(*base().indices);
   }
+  template <class T>
+  bool has_indices() const
+  {
+    return base().indices != nullptr && base().indices->type == cgltf_type_traits<T>::type
+           && base().indices->component_type == cgltf_type_traits<T>::component_type;
+  }
+  size_t triangleCount() const { return base().indices->count / 3u; }
   //CgltfMaterial material() const { return {base().material}; }
   std::span<const cgltf_attribute>        attributes_c() const { return {base().attributes, attributes_count}; }
   std::span<const cgltf_material_mapping> mappings_c() const { return {base().mappings, mappings_count}; }

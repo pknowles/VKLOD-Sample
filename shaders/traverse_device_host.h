@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -23,7 +23,7 @@
 #include "shaders_lod_structs.h"
 #include "shaders_scene.h"
 
-#define TRAVERSAL_WORKGROUP_SIZE 256
+#define TRAVERSAL_WORKGROUP_SIZE 64
 
 #ifdef __cplusplus
 namespace shaders {
@@ -128,12 +128,19 @@ struct JobStatus
   // for 8 jobs per cluster queue item).
   int remaining;
 
+  // Only used for per-instance traversal to allocate items in
+  // 'selectedClusters' before grouping into blasInputClustersAddress. Ends up
+  // with the same value as blasInputClustersAlloc.
+  int selectedClusterAlloc;
+
+  // Allocates ranges of clusters in 'blasInputClustersAddress'
   int blasInputClustersAlloc;
 };
 
 struct TraversalParams
 {
   mat4     viewTransform;
+  vec3     viewPosition;
   float    distanceToUNorm32;
   float    errorOverDistanceThreshold;
   uint32_t useOcclusion;
@@ -143,18 +150,64 @@ struct TraversalParams
   float    hizSizeMax;
 };
 
-#define TRAVERSAL_NEAREST_INSTANCE_COUNT 4
+#define TRAVERSAL_NEAREST_INSTANCE_COUNT 8
+
+// When the above instance count is exhausted, fall back to a straight distance
+// from the object space origin check, i.e. omnidirectional LOD.
+#define TRAVERSAL_CONSERVATIVE_FALLBACK 1
+
+struct TraverseStats
+{
+  uint32_t triangleCount;
+  uint32_t instancesTraversed;
+  uint32_t maxInstancesPerMesh;
+  uint32_t errorNodeQueueOverflow;
+  uint32_t errorClusterQueueOverflow;
+  uint32_t errorTraversalIncomplete;
+  uint32_t errorEmptyTraversalResults;
+  uint32_t errorBlasInputOverflow;
+};
 
 struct MeshInstances
 {
-  mat4x3  instanceToEye[TRAVERSAL_NEAREST_INSTANCE_COUNT];
-  float   uniformScale[TRAVERSAL_NEAREST_INSTANCE_COUNT];
-  uint8_t enabled[TRAVERSAL_NEAREST_INSTANCE_COUNT];
+  // Rather than provide the instance transform, it's cheaper to compute the
+  // camera's position in object space in traverse_init.comp.glsl. This is
+  // possible because the LOD metric is purely distance based.
+  vec3 camerasInObjectSpace[TRAVERSAL_NEAREST_INSTANCE_COUNT];
+
+  // Number of valid items in camerasInObjectSpace to be considered during
+  // traversal.
+  uint8_t instanceCount;
+
+  // When non-zero, assume the x component of camerasInObjectSpace[instanceCount
+  // - 1] is a radius around the root bounding sphere that remaining cameras
+  // must be outside
+  uint8_t lastInstanceIsRadius;
+};
+
+// This avoids the allocation problem of not knowing the number of clusters that
+// will be selected during traversal. We first write all selected clusters to a
+// global buffer, arbitrarily sized at launch, and then linearize them per
+// instance or mesh. For per-instance traversal, out-of-memory can still occur
+// if too many instances are near the camera, in which case they fall back to
+// the min-detail BLAS.
+struct SelectedCluster
+{
+  uint32_t objectIndex;  // instance or mesh, depending on TRAVERSE_PER_INSTANCE
+  uint64_t clusterAddress;
 };
 
 struct SortingMeshInstances
 {
   uint64_t nearest[TRAVERSAL_NEAREST_INSTANCE_COUNT];  // {sortKey, instanceIndex} pairs updated with atomics
+};
+
+// VkDispatchIndirectCommand
+struct DispatchIndirect
+{
+  uint32_t x;
+  uint32_t y;
+  uint32_t z;
 };
 
 struct TraversalConstants
@@ -166,6 +219,7 @@ struct TraversalConstants
   DEVICE_ADDRESS(EncodedNodeJob) nodeQueueAddress;
   DEVICE_ADDRESS(EncodedClusterJob) clusterQueueAddress;
   DEVICE_ADDRESS(JobStatus) jobStatusAddress;
+  DEVICE_ADDRESS(TraverseStats) traverseStatsAddress;
 
   DEVICE_ADDRESS(ClusterBLASInfoNV) blasInputAddress;
   DEVICE_ADDRESS(uint64_t) blasInputClustersAddress;
@@ -174,8 +228,12 @@ struct TraversalConstants
   DEVICE_ADDRESS(DrawMeshTasksIndirect) drawMeshTasksIndirectAddress;
   DEVICE_ADDRESS(DrawStats) drawStatsAddress;
 
-  DEVICE_ADDRESS(MeshInstances) meshInstances;                // null depending on TRAVERSE_PER_INSTANCE
-  DEVICE_ADDRESS(SortingMeshInstances) sortingMeshInstances;  // null depending on TRAVERSE_PER_INSTANCE
+  DEVICE_ADDRESS(MeshInstances) meshInstances;                // null if TRAVERSE_PER_INSTANCE
+  DEVICE_ADDRESS(SortingMeshInstances) sortingMeshInstances;  // null if TRAVERSE_PER_INSTANCE
+
+  DEVICE_ADDRESS(SelectedCluster) selectedClusters;                        // null if not TRAVERSE_PER_INSTANCE
+  DEVICE_ADDRESS(DispatchIndirect) writeSelectedClustersDispatchIndirect;  // null if not TRAVERSE_PER_INSTANCE
+  uint32_t maxSelectedClusters;
 
   uint32_t nodeQueueSize;
   uint32_t clusterQueueSize;
@@ -207,10 +265,13 @@ DECL_MUTABLE_BUFFER_REF(ClusterBLASInfoNVArray, ClusterBLASInfoNV);
 DECL_MUTABLE_BUFFER_REF(TraversalParamsArray, TraversalParams);
 DECL_MUTABLE_BUFFER_REF(MeshInstancesArray, MeshInstances);
 DECL_MUTABLE_BUFFER_REF(SortingMeshInstancesArray, SortingMeshInstances);
+DECL_MUTABLE_BUFFER_REF(SelectedClusterArray, SelectedCluster);
+DECL_MUTABLE_BUFFER_REF(DispatchIndirectArray, DispatchIndirect);
 DECL_BUFFER_REF(NodeQueueArray, uint64_t);
 DECL_BUFFER_REF(ClusterQueueArray, uint64_t);
 DECL_MUTABLE_BUFFER_REF(DrawClusterArray, DrawCluster);
 DECL_MUTABLE_BUFFER_REF(InstanceInfoArray, InstanceInfo);
+DECL_BUFFER_REF_SINGLE_BASE(TraverseStatsRef, , TraverseStats, 4)  // TODO: validate alignment like array refs
 #endif
 
 #ifdef __cplusplus

@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -17,13 +17,14 @@
 
 #pragma once
 
-#include "vulkan/vulkan_core.h"
 #include <debug_range_summary.hpp>
 #include <decodeless/offset_span.hpp>
 #include <decodeless/writer.hpp>
 #include <filesystem>
+#include <generate_mesh.hpp>
 #include <memory.h>
 #include <memory_resource>
+#include <mesh_util.hpp>
 #include <nvcluster/nvcluster.h>
 #include <nvclusterlod/nvclusterlod_hierarchy.h>
 #include <nvclusterlod/nvclusterlod_hierarchy_storage.hpp>
@@ -37,11 +38,12 @@
 #include <shaders/shaders_scene.h>
 #include <shaders/traverse_device_host.h>
 #include <stdlib.h>
+#include <vulkan/vulkan_core.h>
 
 // The render cache is a memory mapped file of raw structs. This version is used
 // to invalidate it after making a binary-incompatible change to the relevant
 // structs below
-#define SCENE_RENDERCACHE_VERSION 5
+#define SCENE_RENDERCACHE_VERSION 7
 
 namespace fs            = std::filesystem;
 
@@ -72,52 +74,6 @@ inline auto indices(nvcluster_Range range)
 }
 
 // Temporary whole-mesh structure before it's split into clusters
-struct AABB
-{
-  glm::vec3 min, max;
-
-#ifndef GLM_FORCE_CTOR_INIT
-  // Force zero initialization if config not set
-  constexpr AABB()
-      : min{}
-      , max{}
-  {
-  }
-  constexpr AABB(const glm::vec3& min_, const glm::vec3& max_)
-      : min(min_)
-      , max(max_)
-  {
-  }
-#endif
-
-  // Plus returns the union of bounding boxes.
-  // [[nodiscard]] allows the compiler to warn if the return value is ignored,
-  // which would be a bug. E.g. a + b; but should be a += b;
-  [[nodiscard]] constexpr AABB operator+(const AABB& other) const
-  {
-    return {glm::min(min, other.min), glm::max(max, other.max)};
-  }
-  constexpr AABB& operator+=(const AABB& other) { return *this = *this + other; };
-
-  [[nodiscard]] constexpr glm::vec3 size() const { return max - min; }
-  [[nodiscard]] constexpr glm::vec3 center() const { return (min + max) * 0.5f; }
-  [[nodiscard]] constexpr glm::vec3 positive_size() const { return glm::max(glm::vec3(0.0f), size()); }
-  [[nodiscard]] constexpr AABB      positive() const { return {min, min + positive_size()}; }
-  [[nodiscard]] constexpr float     half_area() const
-  {
-    auto s = size();
-    return s.x * (s.y + s.z) + s.y * s.z;
-  }
-  [[nodiscard]] constexpr AABB intersect(const AABB& other) const
-  {
-    return AABB{glm::max(min, other.min), glm::min(max, other.max)}.positive();
-  }
-  [[nodiscard]] constexpr static AABB empty()
-  {
-    return {glm::vec3{std::numeric_limits<float>::max()}, glm::vec3{std::numeric_limits<float>::lowest()}};
-  }
-};
-
 struct Mesh;
 
 // Spatially local groups of geometry and the output from LOD/clustering. Most
@@ -200,8 +156,10 @@ struct SceneCounts
   uint32_t totalVertices            = 0;
   uint32_t maxClustersPerGroup      = 0;
   uint32_t maxClustersPerMesh       = 0;
+  uint32_t maxLod0ClustersPerMesh   = 0;
   uint32_t maxClusterTriangleCount  = 0;
   uint32_t maxClusterVertexCount    = 0;
+  uint32_t maxInstancesPerMesh      = 0;
   uint32_t maxLODLevel              = 0;
   uint32_t maxTotalInstanceClusters = 0;
   uint32_t maxTotalInstanceNodes    = 0;
@@ -221,24 +179,29 @@ struct SceneImage
 // single memory mapped render cache file. This struct itself resides there.
 struct Scene
 {
-  uint32_t                   version;
+  uint32_t                   version = 0;
   offset_span<ClusteredMesh> meshes;
   offset_span<Instance>      instances;
   offset_span<SceneImage>    images;
   offset_span<uint32_t>      meshGroupOffsets;    // includes total count in the last element
   offset_span<uint32_t>      meshInstanceCounts;  // Number of instances referencing each mesh
   SceneCounts                counts;
-  AABB                       worldAABB;
+  AABB                       worldAABB                     = AABB::make_empty();
+  float                      maxWorldDiagonalInObjectSpace = 0.0f;
 };
 
 // A render cache file memory mapping and a pointer into it
 struct SceneFile
 {
-  SceneFile(const fs::path& gltfPath, const fs::path& cachePath, const SceneLodConfig& lodConfig, bool invalidateCache);
-  const Scene*                    data;
-  fs::path                        path;
-  std::optional<decodeless::file> memoryMap;
+  SceneFile(decodeless::file&& memoryMap, const fs::path& path = fs::path());
+  const Scene*     data;
+  fs::path         path;  // generated if empty
+  decodeless::file memoryMap;
 };
+
+std::optional<SceneFile> makeSceneFromCache(const fs::path& gltfPath, const fs::path& cachePath);
+SceneFile makeSceneFromGltf(const fs::path& gltfPath, const fs::path& cachePath, const SceneLodConfig& lodConfig, TaskProgress& progress);
+SceneFile makeSceneFromGenerated(GeneratedScene&& generatedScene, const fs::path& cachePath, const SceneLodConfig& lodConfig, TaskProgress& progress);
 
 // Per-mesh vulkan data for rendering
 struct ClusteredMeshVk
@@ -250,6 +213,12 @@ struct ClusteredMeshVk
   vkobj::Buffer<nvclusterlod_Sphere>        groupBoundingSphers;  // For traversal without streaming
   vkobj::Buffer<uint8_t>                    groupLodLevels;       // visualization only
   static_assert(sizeof(nvclusterlod_Sphere) == sizeof(float) * 4);
+
+  VkDeviceSize deviceMemoryUsage() const
+  {
+    return nodes.size_bytes() + groups.size_bytes() + groupQuadricErrors.size_bytes() + groupBoundingSphers.size_bytes()
+           + groupLodLevels.size_bytes();
+  }
 };
 
 // Vulkan buffers of Scene data needed for rendering on the GPU with the
@@ -265,6 +234,8 @@ struct SceneVK
   // plumbed through from the streaming thread.
   void cmdResetStreaming(ResourceAllocator* allocator, const Scene& scene, VkCommandBuffer cmd);
 
+  VkDeviceSize deviceMemoryUsage() const { return staticDeviceMemoryUsage; }
+
   // Everything needed to render the scene, with the exception of
   // ClusterGroupGeometryVk
   std::vector<ClusteredMeshVk>       clusteredMeshes;
@@ -275,8 +246,11 @@ struct SceneVK
   std::vector<TextureVk>             textures;
   std::vector<VkDescriptorImageInfo> textureDescriptors;
 
-  // Counts of geometry streamed so far for conservative allocation resizing
-  // TODO: use fixed allocations instead
+  VkDeviceSize staticDeviceMemoryUsage = 0;
+
+  // Counts of geometry streamed so far. Could be used for conservative
+  // allocations but gets big fast. Better to place a global limit on resident
+  // cluster groups.
   uint64_t totalResidentClusters         = 0;
   uint64_t totalResidentInstanceClusters = 0;
 };
@@ -290,7 +264,7 @@ inline std::ostream& operator<<(std::ostream& os, const shaders::Material& x)
   os << "  albedo " << x.albedo << "\n";
   numerical_chars::operator<<(os, x.albedoTexture);
   os << "  albedoTexture " << x.albedoTexture << "\n";
-  os << "  padding1 " << x.padding1 << "\n";
+  os << "  metallicRoughnessTexture " << x.metallicRoughnessTexture << "\n";
   os << "  padding2 " << x.padding2 << "\n";
   os << "  padding3 " << x.padding3 << "\n";
   os << "  roughness " << x.roughness << "\n";

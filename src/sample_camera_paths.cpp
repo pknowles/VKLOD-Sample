@@ -53,7 +53,7 @@ void Keyframe::toCamera(nvh::CameraManipulator& camera)
   // Use +Y = up if it's close enough to keep the checkbox in the UI checked
   if(fabs(glm::dot(glm::cross(up, forward), glm::vec3(0.0f, 1.0f, 0.0f))) < 0.0001f)
     up = glm::vec3(0.0f, 1.0f, 0.0f);
-  printf("%f\n", fabs(glm::dot(glm::cross(up, forward), glm::vec3(0.0f, 1.0f, 0.0f))));
+  //printf("%f\n", fabs(glm::dot(glm::cross(up, forward), glm::vec3(0.0f, 1.0f, 0.0f))));
   camera.setLookat(eye, center, up, true);
   camera.setFov(fov);
 }
@@ -212,6 +212,7 @@ void CameraPath::onUIRender()
   };
   ImGui::InputText("Name", name.data(), name.capacity() + 1, ImGuiInputTextFlags_CallbackResize, resize, &name);
   ImGui::SliderFloat("Animation Duration", &duration, 0.1f, 60.0f, "%.1f seconds");
+  ImGui::BeginDisabled(keyframes.size() < 2);
   if(ImGui::SliderFloat("Jump to position", &m_seekPosition, 0.0f, 1.0f))
   {
     interpolate(m_seekPosition).toCamera(nvh::CameraManipulator::Singleton());
@@ -220,6 +221,7 @@ void CameraPath::onUIRender()
   {
     interpolate(m_seekPosition).toCamera(nvh::CameraManipulator::Singleton());
   }
+  ImGui::EndDisabled();
 
   // Display the list of camera positions
   for(size_t i = 0; i < keyframes.size(); ++i)
@@ -329,6 +331,9 @@ void CameraPathsElement::onUIRender()
 {
   if(!m_showWindow)
     return;
+
+  // Set initial window size (only on first appearance)
+  ImGui::SetNextWindowSize(ImVec2(400, 600), ImGuiCond_FirstUseEver);
 
   // Opening the window
   if(!ImGui::Begin(WindowName, &m_showWindow))

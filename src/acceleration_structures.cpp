@@ -16,6 +16,7 @@
  */
 
 #include <acceleration_structures.hpp>
+#include <nvh/nsightevents.h>
 #include <sample_allocation.hpp>
 #include <sample_vulkan_objects.hpp>
 #include <stdexcept>
@@ -39,7 +40,7 @@ BlasArray::BlasArray(ResourceAllocator* allocator, uint32_t blasCount, uint32_t 
 
 BlasArray::OldBuffers BlasArray::resize(ResourceAllocator* allocator, uint32_t maxTotalClusters)
 {
-  LOGI("Reallocating BLAS: %u\n", maxTotalClusters);
+  printf("Reallocating BLAS: %u\n", maxTotalClusters);
   assert(maxTotalClusters > 0);
   m_maxTotalClusters = maxTotalClusters;
 
@@ -173,56 +174,76 @@ void BlasArray::cmdBuild(VkCommandBuffer cmd, VkStridedDeviceAddressRegionKHR ad
                 VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR);
 }
 
-Tlas::Tlas(ResourceAllocator* allocator, const vkobj::Buffer<VkAccelerationStructureInstanceKHR>& tlasInfo, VkCommandBuffer initCmd)
+struct TlasInput
 {
-  VkAccelerationStructureGeometryKHR instancesGeometry = {
-      .sType        = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR,
-      .pNext        = nullptr,
-      .geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR,
-      .geometry =
-          VkAccelerationStructureGeometryDataKHR{
-              .instances =
-                  {
-                      .sType           = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR,
-                      .pNext           = nullptr,
-                      .arrayOfPointers = VK_FALSE,
-                      .data =
-                          VkDeviceOrHostAddressConstKHR{
-                              .deviceAddress = static_cast<VkDeviceAddress>(tlasInfo.address()),
-                          },
-                  },
-          },
-      .flags = 0,
-  };
-  VkAccelerationStructureBuildRangeInfoKHR rangeInfo{
-      .primitiveCount  = uint32_t(tlasInfo.size()),
-      .primitiveOffset = 0,
-      .firstVertex     = 0,
-      .transformOffset = 0,
-  };
-  VkBuildAccelerationStructureFlagsKHR buildFlags = m_buildFlags | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR
-                                                    | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_DATA_ACCESS_KHR;
-  rt::AccelerationStructureSizes sizes(allocator, VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR, buildFlags,
-                                       std::span(&instancesGeometry, 1), std::span(&rangeInfo, 1));
+  TlasInput(const vkobj::Buffer<VkAccelerationStructureInstanceKHR>& tlasInfo)
+     : geometry{
+        .sType        = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR,
+        .pNext        = nullptr,
+        .geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR,
+        .geometry =
+            VkAccelerationStructureGeometryDataKHR{
+                .instances =
+                    {
+                        .sType           = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR,
+                        .pNext           = nullptr,
+                        .arrayOfPointers = VK_FALSE,
+                        .data =
+                            VkDeviceOrHostAddressConstKHR{
+                                .deviceAddress = static_cast<VkDeviceAddress>(tlasInfo.address()),
+                            },
+                    },
+            },
+        .flags = 0,
+    },
+    rangeInfo{
+        .primitiveCount  = uint32_t(tlasInfo.size()),
+        .primitiveOffset = 0,
+        .firstVertex     = 0,
+        .transformOffset = 0,
+    }
+  {
+  }
+  VkAccelerationStructureGeometryKHR       geometry;
+  VkAccelerationStructureBuildRangeInfoKHR rangeInfo;
+};
 
-  m_tlasScratchBuffer = vkobj::Buffer<std::byte>(allocator, std::max(sizes->buildScratchSize, sizes->updateScratchSize),
-                                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                                                 VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-  m_deviceMemory += m_tlasScratchBuffer.size_bytes();
-
+inline Tlas makeTlas(ResourceAllocator*                                       allocator,
+                     const vkobj::Buffer<VkAccelerationStructureInstanceKHR>& tlasInfo,
+                     VkCommandBuffer                                          initCmd,
+                     VkBuildAccelerationStructureFlagsKHR                     buildFlags)
+{
   // We want to record a command buffer that updates the acceleration structure,
   // so we do a regular build first, i.e.
   // VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR now and
   // VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR in cmdUpdate()
   VkAccelerationStructureCreateFlagsKHR createFlags = 0;
-  m_tlas                                            = std::make_unique<rt::BuiltAccelerationStructure>(
-      rt::AccelerationStructure(allocator, VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR, *sizes, createFlags), buildFlags,
-      std::span(&instancesGeometry, 1), std::span(&rangeInfo, 1), VkDeviceAddress(m_tlasScratchBuffer.address()), initCmd);
-  m_deviceMemory += sizes->accelerationStructureSize;
+  TlasInput                             tlasInput(tlasInfo);
+  VkBuildAccelerationStructureFlagsKHR fullBuildFlags = buildFlags | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR
+                                                        | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_DATA_ACCESS_KHR;
+  rt::AccelerationStructureSizes sizes(allocator, VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR, fullBuildFlags,
+                                       std::span(&tlasInput.geometry, 1), std::span(&tlasInput.rangeInfo, 1));
+  vkobj::Buffer<std::byte>       scratch(allocator, std::max(sizes->buildScratchSize, sizes->updateScratchSize),
+                                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+
+  rt::BuiltAccelerationStructure builtTlas(
+      rt::AccelerationStructure(allocator, VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR, *sizes, createFlags), fullBuildFlags,
+      std::span(&tlasInput.geometry, 1), std::span(&tlasInput.rangeInfo, 1), scratch.address().address, initCmd);
 
   // Barrier for immediate update afterwards
   memoryBarrier(initCmd, VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR, VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
                 VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR);
+
+  return Tlas(std::move(builtTlas), std::move(scratch), buildFlags);
+}
+
+Tlas::Tlas(ResourceAllocator*                                       allocator,
+           const vkobj::Buffer<VkAccelerationStructureInstanceKHR>& tlasInfo,
+           VkCommandBuffer                                          initCmd,
+           VkBuildAccelerationStructureFlagsKHR                     buildFlags)
+    : Tlas(makeTlas(allocator, tlasInfo, initCmd, buildFlags))
+{
 }
 
 void Tlas::cmdUpdate(const vkobj::Buffer<VkAccelerationStructureInstanceKHR>& tlasInfo, VkCommandBuffer cmd, bool rebuild)
@@ -256,8 +277,8 @@ void Tlas::cmdUpdate(const vkobj::Buffer<VkAccelerationStructureInstanceKHR>& tl
                                                     | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_DATA_ACCESS_KHR;
 
   // Record a build or update into cmd
-  m_tlas->build(buildFlags, std::span(&instancesGeometry, 1), std::span(&rangeInfo, 1), !rebuild /* update */,
-                static_cast<VkDeviceAddress>(m_tlasScratchBuffer.address()), cmd);
+  m_tlas.build(buildFlags, std::span(&instancesGeometry, 1), std::span(&rangeInfo, 1), !rebuild /* update */,
+               static_cast<VkDeviceAddress>(m_tlasScratchBuffer.address()), cmd);
   memoryBarrier(cmd, VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
                 VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR,
                 VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR);
@@ -363,7 +384,8 @@ ClasStaging::ClasStaging(ResourceAllocator*                   allocator,
                                           | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR,
                                       VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
   m_clasAddresses = vkobj::Buffer<VkDeviceAddress>(allocator, maxClustersPerBuild,
-                                                   VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                                   VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                                                       | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
                                                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
   m_clasPackedAddresses =
       vkobj::Buffer<VkDeviceAddress>(allocator, maxClustersPerBuild,
@@ -407,6 +429,7 @@ void ClasStaging::buildClas(ResourceAllocator*               allocator,
                             uint32_t                         totalClusters,
                             VkCommandBuffer                  cmd)
 {
+  vkobj::NvtxRange buildClasRange("ClasStaging::buildClas");
   assert(loadClusterLoadGroupsHost.size() <= maxClustersPerBuild());
   assert(m_groupTotalClasSizesHost.size() == 0);
   uint32_t newGroupCount = uploadedMods.loadGroupCount;
@@ -531,6 +554,7 @@ void ClasStaging::compactClas(ResourceAllocator*           allocator,
                               VkCommandBuffer              cmd,
                               std::vector<PoolMemory>&     newClases)
 {
+  vkobj::NvtxRange compactClasRange("ClasStaging::compactClas");
   // Make sure buildClas() has completed before reading
   // clasSizes.groupTotalClasSizesHost
   if(!readySemaphoreState.wait(allocator->getDevice(), 0 /* don't wait */))

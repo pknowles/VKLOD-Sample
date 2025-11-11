@@ -41,26 +41,29 @@ namespace shaders {
 #define VISUALIZE_CLUSTER_COLORS 2
 #define VISUALIZE_GENERATING_GROUP_COLORS 3
 #define VISUALIZE_MESH_COLORS 4
-#define VISUALIZE_CLUSTER_LOD 5
-#define VISUALIZE_TRIANGLE_AREA 6
-#define VISUALIZE_TARGET_PIXEL_ERROR 7
+#define VISUALIZE_INSTANCE_COLORS 5
+#define VISUALIZE_CLUSTER_LOD 6
+#define VISUALIZE_TRIANGLE_AREA 7
+#define VISUALIZE_TARGET_PIXEL_ERROR 8
 
 // Definition for the UI
-#define VISUALIZE_ENUM_NAMES \
-  {"None", "Triangle Colors", "Cluster Colors", "Generating Group Colors", "Mesh Colors", "Cluster LOD", "Triangle Area", "Target Pixel Error"}
+#define VISUALIZE_ENUM_NAMES                                                                                           \
+  {"None",        "Triangle Colors", "Cluster Colors",    "Generating Group Colors", "Mesh Colors", "Instance Colors", \
+   "Cluster LOD", "Triangle Area",   "Target Pixel Error"}
 
 struct Instance
 {
   mat4     transform;
+  mat4     transformInv;
   uint32_t meshIndex;
-  float    uniformScale;
+  float    uniformScale;  // Unused; originally for traversal
 };
 
 struct Material
 {
   vec4   albedo;
   int8_t albedoTexture;
-  int8_t padding1;
+  int8_t metallicRoughnessTexture;
   int8_t padding2;
   int8_t padding3;
   float  roughness;
@@ -99,6 +102,7 @@ struct Mesh
   Material material;  // could be an index instead
   uint32_t groupCount;
   uint32_t residentClusterCount;
+  uint32_t instanceCount;
 };
 
 struct DrawCluster

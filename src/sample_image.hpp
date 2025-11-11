@@ -1,28 +1,30 @@
 /*
- * Copyright (c) 2022, NVIDIA CORPORATION.  All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- *
- * SPDX-FileCopyrightText: Copyright (c) 2014-2022 NVIDIA CORPORATION
- * SPDX-License-Identifier: Apache-2.0
  */
 
 #pragma once
 
+#include <fileformats/nv_dds.h>
+#include <fileformats/nv_ktx.h>
+#include <fileformats/texture_formats.h>
 #include <filesystem>
 #include <nvvk/images_vk.hpp>
 #include <nvvk/resourceallocator_vk.hpp>
 #include <optional>
+#include <span>
 #include <stb_image.h>
 #include <vulkan/vulkan_core.h>
 
@@ -43,6 +45,8 @@ struct Image : ImageBase
 {
   UniqueStbiImage8  image8  = {nullptr, &stbi_image_free};
   UniqueStbiImage16 image16 = {nullptr, &stbi_image_free};
+  nv_dds::Image     dds;
+  nv_ktx::KTXImage  ktx;
 };
 
 // RAII Vulkan image object
@@ -96,8 +100,98 @@ private:
   nvvk::Image              m_image;
 };
 
+inline std::optional<Image> createImageDDS(const std::filesystem::path& path, bool srgb)
+{
+  Image result;
+
+  nv_dds::ReadSettings  settings{};
+  nv_dds::ErrorWithText readResult = result.dds.readFromFile(path.string().c_str(), settings);
+  if(readResult.has_value())
+  {
+    LOGE("Failed to read %s using nv_dds: %s\n", path.string().c_str(), readResult.value().c_str());
+    return std::nullopt;
+  }
+
+  // Check for unsupported features
+  if(result.dds.getDepth(0) > 1)
+  {
+    LOGE("This DDS image had a depth of %u, but createImageDDS() cannot handle volume textures.\n", result.dds.getDepth(0));
+    return std::nullopt;
+  }
+  if(result.dds.getNumFaces() > 1)
+  {
+    LOGE("This DDS image had %u faces, but createImageDDS() cannot handle cubemaps.\n", result.dds.getNumFaces());
+    return std::nullopt;
+  }
+  if(result.dds.getNumLayers() > 1)
+  {
+    LOGE("This DDS image had %u array elements, but createImageDDS() cannot handle array textures.\n", result.dds.getNumLayers());
+    return std::nullopt;
+  }
+
+  // Set extent and format
+  result.extent.width  = result.dds.getWidth(0);
+  result.extent.height = result.dds.getHeight(0);
+  result.format        = texture_formats::dxgiToVulkan(result.dds.dxgiFormat);
+  result.format        = texture_formats::tryForceVkFormatTransferFunction(result.format, srgb);
+
+  if(VK_FORMAT_UNDEFINED == result.format)
+  {
+    LOGE("Could not determine a VkFormat for DXGI format %u (%s).\n", result.dds.dxgiFormat,
+         texture_formats::getDXGIFormatName(result.dds.dxgiFormat));
+    return std::nullopt;
+  }
+
+  // Use the first mip level's data
+  const std::vector<char>& mipData = result.dds.subresource(0, 0, 0).data;
+  result.data                      = std::span{reinterpret_cast<const std::byte*>(mipData.data()), mipData.size()};
+
+  return result;
+}
+
+inline std::optional<Image> createImageKTX(const std::filesystem::path& path, bool srgb)
+{
+  Image result;
+
+  const nv_ktx::ReadSettings ktxReadSettings;
+  nv_ktx::ErrorWithText      maybeError = result.ktx.readFromFile(path.string().c_str(), ktxReadSettings);
+  if(maybeError.has_value())
+  {
+    LOGE("Failed to read %s using nv_ktx: %s\n", path.string().c_str(), maybeError->c_str());
+    return std::nullopt;
+  }
+
+  // Check for unsupported features
+  if(result.ktx.mip_0_depth > 1)
+  {
+    LOGE("This KTX image had a depth of %u, but createImageKTX() cannot handle volume textures.\n", result.ktx.mip_0_depth);
+    return std::nullopt;
+  }
+  if(result.ktx.num_faces > 1)
+  {
+    LOGE("This KTX image had %u faces, but createImageKTX() cannot handle cubemaps.\n", result.ktx.num_faces);
+    return std::nullopt;
+  }
+  if(result.ktx.num_layers_possibly_0 > 1)
+  {
+    LOGE("This KTX image had %u array elements, but createImageKTX() cannot handle array textures.\n", result.ktx.num_layers_possibly_0);
+    return std::nullopt;
+  }
+
+  // Set extent and format
+  result.extent.width  = result.ktx.mip_0_width;
+  result.extent.height = result.ktx.mip_0_height;
+  result.format        = texture_formats::tryForceVkFormatTransferFunction(result.ktx.format, srgb);
+
+  // Use the first mip level's data
+  const std::vector<char>& mipData = result.ktx.subresource(0, 0, 0);
+  result.data                      = std::span{reinterpret_cast<const std::byte*>(mipData.data()), mipData.size()};
+
+  return result;
+}
+
 // Loads an decompresses an image from disk into system memory using stb_image
-inline std::optional<Image> createImage(const std::filesystem::path& path, bool srgb)
+inline std::optional<Image> createImageSTB(const std::filesystem::path& path, bool srgb)
 {
   // Read the header once to check how many channels it has. We can't trivially use RGB/VK_FORMAT_R8G8B8_UNORM and
   // need to set req_comp=4 in such cases.
@@ -128,6 +222,25 @@ inline std::optional<Image> createImage(const std::filesystem::path& path, bool 
     result.format = req_comp == 1 ? VK_FORMAT_R8_UNORM : (srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM);
   }
   return result;
+}
+
+inline std::optional<Image> createImage(const std::filesystem::path& path, bool srgb)
+{
+  if(path.extension() == ".dds")
+  {
+    // Special case for DDS images
+    return createImageDDS(path, srgb);
+  }
+  else if(path.extension() == ".ktx" || path.extension() == ".ktx2")
+  {
+    // Special case for KTX images
+    return createImageKTX(path, srgb);
+  }
+  else
+  {
+    // stb for everything else
+    return createImageSTB(path, srgb);
+  }
 }
 
 // Creates a vulkan image initialized from the description and data in system memory

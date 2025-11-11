@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -129,6 +129,7 @@ void RasterizeRenderer::render(const RenderParams& params, const SceneVK& sceneV
       .nodeQueueAddress             = m_traversalData.nodeQueue.address(),
       .clusterQueueAddress          = m_traversalData.clusterQueue.address(),
       .jobStatusAddress             = m_traversalData.jobStatus.address(),
+      .traverseStatsAddress         = vkobj::DeviceAddress<shaders::TraverseStats>(0),
       .blasInputAddress             = vkobj::DeviceAddress<shaders::ClusterBLASInfoNV>(0),  // not relevant to raster
       .blasInputClustersAddress     = vkobj::DeviceAddress<uint64_t>(0),                    // not relevant to raster
       .drawClustersAddress          = m_drawingData.drawClusters.address(),
@@ -136,10 +137,13 @@ void RasterizeRenderer::render(const RenderParams& params, const SceneVK& sceneV
       .drawStatsAddress             = m_drawingData.drawStats.address(),
       .meshInstances                = vkobj::DeviceAddress<shaders::MeshInstances>(0),
       .sortingMeshInstances         = vkobj::DeviceAddress<shaders::SortingMeshInstances>(0),
-      .nodeQueueSize                = uint32_t(m_traversalData.nodeQueue.size()),
-      .clusterQueueSize             = uint32_t(m_traversalData.clusterQueue.size()),
-      .itemsSize                    = uint32_t(sceneVk.instances.size()),
-      .drawClustersSize             = uint32_t(m_drawingData.drawClusters.size()),
+      .selectedClusters             = vkobj::DeviceAddress<shaders::SelectedCluster>(0),
+      .writeSelectedClustersDispatchIndirect = vkobj::DeviceAddress<shaders::DispatchIndirect>(0),
+      .maxSelectedClusters                   = uint32_t(0),
+      .nodeQueueSize                         = uint32_t(m_traversalData.nodeQueue.size()),
+      .clusterQueueSize                      = uint32_t(m_traversalData.clusterQueue.size()),
+      .itemsSize                             = uint32_t(sceneVk.instances.size()),
+      .drawClustersSize                      = uint32_t(m_drawingData.drawClusters.size()),
   };
 
   vkCmdUpdateBuffer(cmd, m_traversalData.constants, 0, sizeof(traversalConstants), &traversalConstants);
@@ -356,14 +360,10 @@ void RasterizeRenderer::resizeTraversalData(const RenderParams& params, const Sc
      || sceneVk.totalResidentInstanceClusters > m_traversalData.clusterQueue.size())
   {
     size_t newClusterQueueSize = (sceneVk.totalResidentInstanceClusters * 3) / 2;
-    LOGI("Reallocating traversal cluster queue: %zu\n", newClusterQueueSize);
+    printf("Reallocating traversal cluster queue: %zu\n", newClusterQueueSize);
 
-    {
-      params.garbage.emplace();
-      params.garbage.back().semaphoreState = params.queueStates.primary.nextSubmitValue();  // will be signalled after rendering the current frame
-      //params.garbage.back().traversalBuffers = {std::move(m_traversalData.clusterQueue)};
-      params.garbage.back().buffers.push_back(std::move(m_traversalData.clusterQueue.moveByteBuffer()));
-    }
+    // nextSubmitValue() will be signalled after rendering the current frame
+    params.garbage.push(Garbage{moveAny(std::move(m_traversalData.clusterQueue)), params.queueStates.primary.nextSubmitValue()});
 
     m_traversalData.clusterQueue =
         vkobj::Buffer<shaders::EncodedClusterJob>(params.context.allocator, newClusterQueueSize,
@@ -379,11 +379,8 @@ void RasterizeRenderer::resizeDrawingData(const RenderParams& params)
 
   if(newSize != m_drawingData.drawClusters.size())
   {
-    {
-      params.garbage.emplace();
-      params.garbage.back().semaphoreState = params.queueStates.primary.nextSubmitValue();  // will be signalled after rendering the current frame
-      params.garbage.back().buffers.push_back(std::move(m_drawingData.drawClusters.moveByteBuffer()));
-    }
+    // nextSubmitValue() will be signalled after rendering the current frame
+    params.garbage.push(Garbage{moveAny(std::move(m_drawingData.drawClusters)), params.queueStates.primary.nextSubmitValue()});
 
     m_drawingData.drawClusters =
         vkobj::Buffer<shaders::DrawCluster>(params.context.allocator, newSize,
@@ -392,10 +389,10 @@ void RasterizeRenderer::resizeDrawingData(const RenderParams& params)
   }
 }
 
-void RasterizeRenderer::updatedFrambuffer(ResourceAllocator* allocator, Framebuffer& framebuffer)
+void RasterizeRenderer::updatedFrambuffer(const RenderParams& params)
 {
-  VkWriteDescriptorSet write = m_traversal.bindings.makeWrite(0, shaders::BTraversalHiZTex, &framebuffer.hizFar());
-  vkUpdateDescriptorSets(allocator->getDevice(), 1u, &write, 0, nullptr);
+  VkWriteDescriptorSet write = m_traversal.bindings.makeWrite(0, shaders::BTraversalHiZTex, &params.framebuffer.hizFar());
+  vkUpdateDescriptorSets(params.context.allocator->getDevice(), 1u, &write, 0, nullptr);
 }
 
 void RasterizeRenderer::initDrawingPipeline(VkDevice              device,
@@ -546,7 +543,13 @@ void RasterizeRenderer::initTraversalPipeline(VkDevice device, SampleGlslCompile
   }
 }
 
-void RasterizeRenderer::ui(bool&, bool&)
+void RasterizeRenderer::uiOverlay()
+{
+  ImGui::Text("Triangles: %s",
+              formatThousands(m_drawingData.drawStatsMapping.span()[m_frame % MAX_CYCLES].triangleCount).c_str());
+}
+
+void RasterizeRenderer::uiSection(bool&, bool&)
 {
 
   ImGui::Text("Rasterization");

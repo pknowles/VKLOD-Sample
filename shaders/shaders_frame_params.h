@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2022-2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2022-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -29,9 +29,8 @@ struct FrameParams
   mat4  projInv;
   mat4  viewInv;
   mat4  viewProj;
+  mat4  viewLast;
   vec3  camPos;
-  float fogHeightOffset;
-  float fogHeightScale;
 };
 
 #ifdef __cplusplus

@@ -57,17 +57,9 @@ layout(set = 0, binding = BRtSkyParam) uniform SkyInfo_ { SimpleSkyParameters sk
 layout(push_constant) uniform RtxPushConstant_ { PathtraceConstant pc; };
 // clang-format on
 
-// Return true if there is no occluder, meaning that the light is visible from P toward L
-bool shadowRay(vec3 P, vec3 L, float maxDist)
-{
-  const uint rayFlags     = gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT;
-  HitPayload savedPayload = payload;
-  payload.depth           = 0;
-  traceRayEXT(topLevelAS, rayFlags, 0xFF, 0, 0, 0, P, 0.0, L, maxDist, 0);
-  bool visible = (payload.depth != 0);
-  payload      = savedPayload;
-  return visible;
-}
+#include "pathtrace_common.h"
+
+const float pi = 3.14159265f;
 
 // Version for refraction
 float fresnelSchlickApprox(vec3 incident, vec3 normal, float ior)
@@ -100,17 +92,29 @@ float schlickMaskingTerm(float NdotL, float NdotV, float roughness)
   return g_v * g_l;
 }
 
-float distributionGGX(float NdotH, float alphaRoughness)  // alphaRoughness    = roughness * roughness;
+float distributionGGX(float NdotH, float alphaRoughness)
 {
   float alphaSqr = max(alphaRoughness * alphaRoughness, 1e-07);
 
   float NdotHSqr = NdotH * NdotH;
   float denom    = NdotHSqr * (alphaSqr - 1.0) + 1.0;
 
-  return alphaSqr / (M_PI * denom * denom);
+  return alphaSqr / (pi * denom * denom);
 }
 
-vec3 ggxDirect(vec3 N, vec3 V, vec3 L, float roughness, float f0, vec3 lightIndensity, vec3 albedo)
+float schlickFresnelMetalness(float metalness, float LdotH)
+{
+  float f90 = 1.0;
+  float f0Dielectric = 0.04;  // Standard dielectric F0
+  float f0Metallic = 0.5;     // Approximate average for metals
+
+  // Two different hard coded f0 values for metallic and non-metallic materials.
+  // Ideally metalness would blend the result of two BRDFs. See:
+  // https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#appendix-b-brdf-implementation
+  return mix(schlickFresnel(f0Dielectric, f90, LdotH), schlickFresnel(f0Metallic, f90, LdotH), metalness);
+}
+
+vec3 ggxDirect(vec3 N, vec3 V, vec3 L, float roughness, float metalness, vec3 lightIndensity, vec3 albedo)
 {
   // Compute half vectors and additional dot products for GGX
   vec3  H     = normalize(V + L);
@@ -122,14 +126,15 @@ vec3 ggxDirect(vec3 N, vec3 V, vec3 L, float roughness, float f0, vec3 lightInde
   // Evaluate terms for our GGX BRDF model
   float D = distributionGGX(NdotH, roughness);
   float G = schlickMaskingTerm(NdotL, NdotV, roughness);
-  float F = schlickFresnel(f0, 1.0, LdotH);
+  float F = schlickFresnelMetalness(metalness, LdotH);
+
+  vec3 specularAlbedo = mix(vec3(1.0), albedo, metalness);
 
   // Evaluate the Cook-Torrance Microfacet BRDF model
   //     Cancel NdotL here to avoid catastrophic numerical precision issues.
   float ggxTerm = D * G * F / (4 * NdotV /* * NdotL */);
 
-  // (assuming M_PI was intended to cancel somewhere)
-  return lightIndensity * (/* NdotL * */ ggxTerm + NdotL * albedo /* / M_PI */);
+  return lightIndensity * (/* NdotL * */ ggxTerm * pi * specularAlbedo + NdotL * albedo * (1.0 - metalness));
 }
 
 // Utility function to get a vector perpendicular to an input vector
@@ -152,7 +157,7 @@ vec3 getCosHemisphereSample(inout uint seed, vec3 hitNorm)
   vec3  bitangent = getPerpendicularVector(hitNorm);
   vec3  tangent   = cross(bitangent, hitNorm);
   float r         = sqrt(randVal.x);
-  float phi       = 2.0f * 3.14159265f * randVal.y;
+  float phi       = 2.0f * pi * randVal.y;
 
   // Get our cosine-weighted hemisphere lobe sample direction
   return tangent * (r * cos(phi).x) + bitangent * (r * sin(phi)) + hitNorm.xyz * sqrt(1 - randVal.x);
@@ -173,7 +178,7 @@ vec3 getGGXMicrofacetDirection(inout uint seed, float roughness, vec3 hitNorm)
   float a2        = roughness * roughness;
   float cosThetaH = sqrt(max(0.0f, (1.0 - randVal.x) / ((a2 - 1.0) * randVal.x + 1)));
   float sinThetaH = sqrt(max(0.0f, 1.0f - cosThetaH * cosThetaH));
-  float phiH      = randVal.y * M_PI * 2.0f;
+  float phiH      = randVal.y * pi * 2.0f;
 
   // Get our GGX NDF sample (i.e., the half vector)
   return T * (sinThetaH * cos(phiH)) + B * (sinThetaH * sin(phiH)) + hitNorm * cosThetaH;
@@ -238,18 +243,6 @@ vec3 mixBary(vec3 a, vec3 b, vec3 c, vec2 bary)
   return a * (1.0 - bary.x - bary.y) + b * bary.x + c * bary.y;
 }
 
-float fogTransmittance(vec3 p0, vec3 p1, float t /* redundant distance from p0 to p1*/)
-{
-  float h_0 = frameInfo.fogHeightOffset + min(p0.y, p1.y);
-  float h_1 = frameInfo.fogHeightOffset + max(p0.y, p1.y);
-  float a   = 4.0 / frameInfo.fogHeightScale;
-  float b   = 2.0 / frameInfo.fogHeightScale;
-
-  // https://www.wolframalpha.com/input?i=limit%28product%28e%5E%28-b+t+%28e%5E%28-a+*%28%28k%2Fn%29+h_1%2B%281-k%2Fn%29+h_0%29%29%2Fn%29%29%2Ck%2C1%2Cn%29%2Cn%2Cinf%29
-  // TODO: degenerate division fix with 'max()' results in no fog at equal heights
-  return exp((b * (exp(-a * h_1) - exp(-a * h_0)) * t) / max(1e-6, a * (h_1 - h_0)));
-}
-
 void main()
 {
   payload.depth += 1;
@@ -307,14 +300,23 @@ void main()
   vec3 wNorm        = normalize(normalMatrix * interpNormal);
 
   vec4  albedo    = mesh.material.albedo;
-  float f0        = mesh.material.metallic;  // not correct
+  float metalness = mesh.material.metallic;
   float roughness = mesh.material.roughness;
   if(mesh.material.albedoTexture != -1)
     albedo *= texture(texturesMap[mesh.material.albedoTexture], interpTexCoord);
+  if(mesh.material.metallicRoughnessTexture != -1)
+  {
+    vec4 metallicRoughness = texture(texturesMap[mesh.material.metallicRoughnessTexture], interpTexCoord);
+    roughness = metallicRoughness.g;
+    metalness = metallicRoughness.b;
+  }
 
   //wNorm = wGeomNorm;
-  //albedo = vec4(vec3(0.8), 1.0);
+  //albedo = vec4(1.0);
   //albedo.xyz  = wNorm*0.5+0.5;
+  //roughness = 0.0;
+  //metalness = 1.0;
+  //albedo = vec4(0.0, roughness, metalness, 1.0);
 
   vec3 wDir   = normalize(gl_WorldRayDirectionEXT);
   vec3 wEye   = -wDir;
@@ -369,6 +371,8 @@ void main()
     albedo = vec4(colorHash(generatingGroupIndex), 1.0);
   if(pc.config.lodVisualization == VISUALIZE_MESH_COLORS)
     albedo = vec4(colorHash(meshIndex), 1.0);
+  if(pc.config.lodVisualization == VISUALIZE_INSTANCE_COLORS)
+    albedo = vec4(colorHash(gl_InstanceID), 1.0);
   if(pc.config.lodVisualization == VISUALIZE_CLUSTER_LOD)
   {
     uint tmp         = gl_ClusterIDNV_;
@@ -417,28 +421,83 @@ void main()
 
   vec3 newOrigin = wPos + wGeomNorm * 1e-4 + wEye * 1e-4;
 
-  // Very approximate atmospheric fog
+  bool directLightVisible = shadowRay(newOrigin, wLight, 100000.0);
+
+  // Very approximate atmospheric fog, just for primary rays
+  // TODO: handle shadowing in the miss shader too!
+  if(pc.config.fogDensity != 0.0 && payload.depth <= 1)
   {
-    SimpleSkyParameters skyParamsFog = skyInfo;
-    skyParamsFog.lightRadiance       = vec3(0.0);  // Direct sun has already been added
-    vec3  fogAmbient                 = evalSimpleSky(skyParamsFog, wDir);
+    vec3 fogAmbient = skyInfo.horizonColor;  // artificially blend fog with the miss shader radiance
+#if UNSHADOWED_FOG
     float t                          = fogTransmittance(gl_WorldRayOriginEXT, wPos, gl_HitTEXT);
     payload.radiance += payload.transmittance * (1.0 - t) * fogAmbient;  // no direct in-scattering or shadows :(
     payload.transmittance *= t;
-  }
+#else
+    // brute force single-scattering fog approximation
+    #if 1
+    const int   maxShadowSamples = 3;
+    const float ranges[maxShadowSamples] = {0.05, 0.2 - 0.05, 0.7999};
+    #else
+    const int   maxShadowSamples = 8;
+    const float distances[maxShadowSamples] = {0.002, 0.0078, 0.0234, 0.0543, 0.1086, 0.2063, 0.3781, 0.9999};
+    const float ranges[maxShadowSamples]    = {distances[0],
+                                               distances[1] - distances[0],
+                                               distances[2] - distances[1],
+                                               distances[3] - distances[2],
+                                               distances[4] - distances[3],
+                                               distances[5] - distances[4],
+                                               distances[6] - distances[5],
+                                               distances[7] - distances[6]};
+    #endif
 
-  bool visible = shadowRay(newOrigin, wLight, 100000.0);
-  if(visible)
-    payload.radiance += payload.transmittance * ggxDirect(wNorm, wEye, wLight, roughness, f0, lightIntensity, albedo.xyz);
+    float randOffset = rand(payload.seed);
+    vec3  lastPos          = gl_WorldRayOriginEXT;
+    float fogStartHeight = pc.config.fogHeightOffset + pc.config.fogDensity * 0.3;
+    float jumpTo = max(0.0, (fogStartHeight - gl_WorldRayOriginEXT.y) / min(-0.01, wDir.y)) / gl_HitTEXT;
+    float lastDist         = jumpTo * gl_HitTEXT;
+    float fogTraceDist = (1.0 - jumpTo) * gl_HitTEXT;
+    for(int i = 0; i < maxShadowSamples; ++i)
+    {
+      float d = lastDist + ranges[i] * fogTraceDist * randOffset;
+      vec3  p = gl_WorldRayOriginEXT + wDir * d;
+      float t = fogTransmittance(lastPos, p, d - lastDist);
+      if(shadowRay(p, wLight, 100000.0))
+        payload.radiance += payload.transmittance * (1.0 - t) * fogAmbient;
+      payload.transmittance *= t;
+      lastPos = p;
+      lastDist = d;
+    }
+    float t = fogTransmittance(lastPos, wPos, gl_HitTEXT - lastDist);
+    if(directLightVisible)
+      payload.radiance += payload.transmittance * (1.0 - t) * fogAmbient * 0.5;  // half the last in-scattering to compensate for sampling bias towards directLightVisible
+    payload.transmittance *= t;
+#endif
+  }
 
   // Artificially emissive for visualizations
   if(pc.config.lodVisualization != VISUALIZE_NONE)
-    payload.radiance = mix(payload.radiance, payload.transmittance * albedo.xyz, 0.3);
+    payload.radiance += payload.transmittance * albedo.xyz * 0.3;
 
+  payload.albedoMetalness = u8vec4(albedo.xyz * 255.0, metalness * 255.0);
+  payload.normalRoughness = u8vec4((wNorm * 0.5 + 0.5) * 255.0, roughness * 255.0);
+
+  if(directLightVisible)
+    payload.radiance += payload.transmittance * albedo.w * ggxDirect(wNorm, wEye, wLight, roughness, metalness, lightIntensity, albedo.xyz);
+
+  if(albedo.w < 0.3)  // rand(payload.seed)
+  {
+    payload.origin = wPos + wDir * 1e-4;
+    // payload.direction unchanged
+    payload.transmittance *= 1.0 - albedo.w;
+    payload.eventType = EVENT_TYPE_TRANSPARENCY; // stop tracing
+    return;
+  }
+
+  payload.eventType = EVENT_TYPE_DIFFUSE;
   if(pc.config.pathtrace != 0)
   {
     // Largely based off https://cwyman.org/code/dxrTutors/tutors/Tutor14/tutorial14.md.html
-    float diffuseProbability = 0.5;  // lazy 50% rather than weighting by material
+    float diffuseProbability = roughness * roughness;  // should be based on specular albedo
     bool  chooseDiffuse      = (rand(payload.seed) < diffuseProbability);
     if(chooseDiffuse)
     {
@@ -451,10 +510,12 @@ void main()
       // Probability of sampling this ray:  (NdotL / pi) * probDiffuse
       payload.origin    = newOrigin;
       payload.direction = L;
-      payload.transmittance *= albedo.xyz / diffuseProbability;
+      payload.transmittance *= albedo.xyz * (1.0 - metalness) / diffuseProbability;
     }
     else
     {
+      payload.eventType = EVENT_TYPE_SPECULAR;
+
       // Randomly sample the NDF to get a microfacet in our BRDF
       vec3 H = normalize(getGGXMicrofacetDirection(payload.seed, roughness, wNorm));
 
@@ -463,7 +524,7 @@ void main()
       vec3 L = normalize(reflect(-V, H));
 
       // Compute some dot products needed for shading
-      vec3  N     = wNorm;
+      vec3 N = wNorm;
       float NdotL = max(0.001, dot(N, L));
       float NdotH = max(0.001, dot(N, H));
       float LdotH = max(0.001, dot(L, H));
@@ -472,8 +533,10 @@ void main()
       // Evaluate our BRDF using a microfacet BRDF model
       float D       = distributionGGX(NdotH, roughness);
       float G       = schlickMaskingTerm(NdotL, NdotV, roughness);
-      float F       = schlickFresnel(f0, 1.0, LdotH);
+      float F       = schlickFresnelMetalness(metalness, LdotH);
       float ggxTerm = D * G * F / (4 * NdotL * NdotV);
+
+      vec3 specularAlbedo = mix(vec3(1.0), albedo.xyz, metalness);
 
       // What's the probability of sampling vector H from getGGXMicrofacet()?
       float ggxProb = D * NdotH / (4 * LdotH);  // LdotH == HdotV
@@ -483,9 +546,13 @@ void main()
       //    -> Note: Should really cancel and simplify the math above
       payload.origin    = newOrigin;
       payload.direction = L;
+      float ggx = clamp(ggxTerm / ggxProb, 0.0, 1.0);
+      payload.transmittance *= NdotL * specularAlbedo * ggx / (1.0f - diffuseProbability);
+    }
 
-      // TODO: verify this - it seems way too bright
-      payload.transmittance *= NdotL * ggxTerm / (ggxProb * (1.0f - diffuseProbability));
+    if(dot(wGeomNorm, payload.direction) < 0.0)
+    {
+      payload.direction = -reflect(payload.direction, wGeomNorm);
     }
   }
   else  // pc.config.pathtrace
@@ -506,13 +573,14 @@ void main()
         float NdotL = max(0, dot(wNorm, L));
 #if 1
         ambientRadiance +=
-            sampleWeight * ggxDirect(wNorm, wEye, L, mesh.material.roughness, f0, ambientIntensity, albedo.xyz);
+            sampleWeight * ggxDirect(wNorm, wEye, L, mesh.material.roughness, metalness, ambientIntensity, albedo.xyz);
 #else
         ambientRadiance += sampleWeight * albedo.xyz * ambientIntensity * NdotL;
 #endif
       }
     }
     payload.radiance += payload.transmittance * ambientRadiance;
-    payload.depth = PATHTRACE_MAX_RECURSION_DEPTH;  // Stop tracing
+    payload.eventType = EVENT_TYPE_MISS; // stop tracing
+    payload.origin = wPos; // for motion vectors
   }
 }

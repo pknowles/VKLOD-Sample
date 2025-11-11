@@ -1,5 +1,11 @@
 # Streaming and Ray Tracing Continuous Level of Detail
 
+> [!IMPORTANT]
+> This repository has been archived in favor of a similar sample,
+> [vk_lod_clusters](https://github.com/nvpro-samples/vk_lod_clusters), and is no
+> longer maintained by NVIDIA. `vk_lod_clusters` has progressed in features and
+> continues to do so.
+
 ![preview](doc/clusters.jpg)
 
 This is a Vulkan application that renders large scenes with real time ray
@@ -96,13 +102,22 @@ extension.
 
 - **Per-mesh Cluster Selection**
 
-  Rasterizers like Nanite must select clusters, referred to as *hierarchy
-  traversal*, for every instance of every mesh. Because this is ray-tracing
-  there is little cost to simply reusing the highest detail instance for the
-  rest. The cost to build its BLAS must be paid anyway, not to mention the
-  memory requirements. This demo defaults to selecting clusters for each mesh
-  with the closest four instances in mind, making a single conservatively high
-  detail BLAS that is then used for all instances.
+  Rasterizers like Nanite must select clusters, referred to in the code as
+  *hierarchy traversal*, for every instance of every mesh. For ray tracing this
+  would require a BLAS per instance, rather than per mesh, increasing memory
+  usage. Instead, this demo creates a single conservatively high detailed BLAS
+  for each mesh and reuses it for all instances. The cost to build a high detail
+  BLAS must be paid anyway. There is little cost for ray tracing over-detailed
+  instances, although admittedly some. The conservatively high detailed BLAS is
+  made by choosing clusters with the closest few instances in mind. See
+  `TRAVERSAL_NEAREST_INSTANCE_COUNT`. Some can be culled using a 3D Limaçon
+  shape and there is an optional conservative fallback if this still overflows.
+
+  For comparison, this sample includes code to perform per-instance traversal
+  too, under *Rendering -> Per-Instance Traversal* in the UI. Overall
+  performance and memory usage is not as good. BLAS allocation comes from a
+  shared pool, so it is one step above naively allocating for worst case
+  per-instance selected cluster counts.
 
 - **Batched Streaming**
 
@@ -167,6 +182,42 @@ extension.
   `vk_lod_clusters` sample does this with a [fixed-size
   allocator](https://github.com/nvpro-samples/vk_lod_clusters#gpu-driven-clas-allocation).
 
+  To avoid unloading and re-loading the same geometry, unloads are delayed until
+  there is memory pressure. This is a trivial 'return' when memory usage is
+  below a low water mark. Ideally, memory might even be reclaimed on-demand, but
+  the GPU may be rendering from the memory while this would be needed
+  asynchronously.
+
+### Further Optimizations and Considerations
+
+  This sample is intended to be a simple first cut and demonstration for
+  streaming and ray tracing giant scenes with LOD. In the interest of exploring
+  the design space, consider the following.
+
+  An alternative approach is to separate the instance cluster selection and
+  conservative merging operations that this sample combines: traversal is done
+  for multiple instances, but just flagging traversed cluster groups rather than
+  selecting final clusters. Then a second traversal per mesh is able to select
+  clusters based on flagged groups. Notably, the streaming system operates at
+  group granularity and residency is a lot like these flags. A shortcut is to
+  select just the highest detail clusters streamed in. However, LOD selection
+  must still be performed for some instances to drive streaming. There can be
+  many instances so some form of filtering is important.
+
+  Over-detailed instances can impact trace performance, which motivates
+  partially re-introducing discrete LOD and rendering far instances with lower
+  detail meshes. Choosing a selection of LODs to build, by distance or level, is
+  a matter of balance. Moreover, if there are no close instances — where
+  continuous LOD is most beneficial — using only the pre-built discrete LODs
+  avoids rebuilding a BLAS for that mesh.
+
+  [vk_lod_clusters](https://github.com/nvpro-samples/vk_lod_clusters) implements
+  much of this. It classifies instances with discrete LOD range histograms to
+  reduce the number of candidate instances needed for traversal. It then builds
+  BLAS with conservative max-detail, discrete medium and low detail. Instances
+  select the appropriate BLAS. It also includes a cache to avoid rebuilding BLAS
+  frame-to-frame when possible.
+
 ## Reading the code
 
 Some key parts to focus on:
@@ -194,8 +245,11 @@ setup and rendering in `main.cpp` and `renderer_*`.
 
 This demo leans towards RAII and layered utilities. For readers who prefer more
 direct inline Vulkan API calls, you might find some equivalent functionality in
-[**vk_lod_clusters**](https://github.com/nvpro-samples/vk_lod_clusters) more to
-your liking.
+[vk_lod_clusters](https://github.com/nvpro-samples/vk_lod_clusters) more to your
+liking.
+
+The path tracing and shading code is illustrative only and not intended as a
+reference implementation.
 
 ## Building and Dependencies
 
@@ -224,11 +278,12 @@ cmake --build build --parallel
 
 For **Windows** you may be more comfortable with `cmake-gui`.
 
-Drag/drop your own `.gltf` files over the window or launch with `--mesh
-<mesh.gltf>`. Processing a big scenes can take some time, e.g. on the order of a
-minutes. By default a `rendercache_<mesh.gltf>.dat` cache is created next to the
-executable so a subsequent launch will be faster. The location can be set with
-`--cache-dir`.
+The bunny model is loaded by default as a quick placeholder. You can click
+**Generate Procedural Scene**, drag/drop your own `.gltf` files over the window
+or launch with `--mesh <mesh.gltf>`. Processing a big scenes can take some time,
+e.g. on the order of a minutes. By default a `rendercache_<mesh.gltf>.dat` cache
+is created in the current working directory so a subsequent launch will be
+faster. The location can be set with `--cache-dir`.
 
 Two larger scenes based on models from
 [https://threedscans.com/](https://threedscans.com/) are available to play with:

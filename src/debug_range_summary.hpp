@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2023-2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -46,6 +46,20 @@ inline std::ostream& operator<<(std::ostream& os, unsigned char c)
 }
 }  // namespace numerical_chars
 
+template <char separator = ',', std::integral T>
+std::string formatThousands(T number)
+{
+  std::string countStr = std::to_string(number);
+  std::string result;
+  result.reserve(countStr.length() + countStr.length() / 3);
+  for(size_t i = 0; i < countStr.length(); ++i)
+  {
+    if(i > 0 && (countStr.length() - i) % 3 == 0)
+      result += separator;
+    result += countStr[i];
+  }
+  return result;
+}
 
 // clang-format off
 namespace glm {
@@ -292,18 +306,19 @@ template <class T>
 std::ostream& rangeSummaryVk(std::ostream& os, const vkobj::Buffer<T>& array, size_t maxItems = 6, bool multiline = false)
 {
   std::span<const T> hostArray = BufferDownloader::download(array);
-  return rangeSummary(os << static_cast<VkDeviceAddress>(array.address()), hostArray, maxItems, multiline);
+  VkDeviceAddress    address   = array.address().address;
+  return rangeSummary(os << reinterpret_cast<void*>(address), hostArray, maxItems, multiline);
 }
 
 template <class T>
 std::ostream& rangeSummaryVk(std::ostream& os, vkobj::DeviceAddress<T> address, size_t elementCount, size_t maxItems = 6, bool multiline = false)
 {
   std::span<const T> hostArray = BufferDownloader::download(address, elementCount);
-  return rangeSummary(os << static_cast<VkDeviceAddress>(address), hostArray, maxItems, multiline);
+  return rangeSummary(os << reinterpret_cast<void*>(address.address), hostArray, maxItems, multiline);
 }
 
 template <class T>
 std::ostream& rangeSummaryVk(std::ostream& os, VkDeviceAddress address, size_t elementCount, size_t maxItems = 6, bool multiline = false)
 {
-  return rangeSummaryVk(os << address, vkobj::DeviceAddress<T>(address), elementCount, maxItems, multiline);
+  return rangeSummaryVk(os << reinterpret_cast<void*>(address), vkobj::DeviceAddress<T>(address), elementCount, maxItems, multiline);
 }
