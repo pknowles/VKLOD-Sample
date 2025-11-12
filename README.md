@@ -16,9 +16,11 @@ from disk, like [Nanite's virtual
 geometry](https://dev.epicgames.com/documentation/en-us/unreal-engine/nanite-virtualized-geometry-in-unreal-engine)
 but for ray tracing. It is
 [RAII](https://www.heuristic42.com/blog/66/raii-the-powerful-implication-of-always-initializing/)
-leaning and shows both Vulkan API usage and some object design ideas to
-facilitate streaming and HW accelerated raytracing. To run it, download and
-[build](#building-and-dependencies) from source.
+leaning and intends to demonstrate Vulkan API usage and object design ideas.
+[**Download and run the latest
+release**](https://github.com/pknowles/VKLOD-Sample/releases/latest) or
+[build](#building-and-dependencies) from source. You'll need an NVIDIA RTX GPU
+and somewhat recent [drivers](https://www.nvidia.com/drivers/).
 
 A series of NVIDIA RTX Mega Geometry and *cluster acceleration structure*
 samples can be found here:

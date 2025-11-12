@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=VKLOD Sample
+GenericName=Ray Tracing LOD Demo
+Comment=Streaming and Ray Tracing Continuous Level of Detail
+Exec=VKLOD-Sample_app
+Icon=VKLOD-Sample
+Terminal=false
+Categories=Graphics
+Keywords=vulkan;raytracing;rtx;nvidia;lod;streaming;3d;graphics;rendering;
+StartupNotify=true
+StartupWMClass=VKLOD-Sample_app
+MimeType=model/gltf+json;model/gltf-binary;
+

@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="64" height="64" version="1.1" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<defs>
+<linearGradient id="a" x1="50" x2="17.348" y1="818.89" y2="752.36" gradientUnits="userSpaceOnUse">
+<stop stop-color="#8b1919" offset="0"/>
+<stop stop-color="#401947" offset=".28816"/>
+<stop stop-color="#4f53a5" offset=".73997"/>
+<stop stop-color="#41bda0" offset="1"/>
+</linearGradient>
+<linearGradient id="n" x1="50" x2="17.348" y1="818.89" y2="752.36" gradientUnits="userSpaceOnUse">
+<stop stop-color="#b3452a" offset="0"/>
+<stop stop-color="#592f5b" offset=".3272"/>
+<stop stop-color="#2e2f6c" offset=".66788"/>
+<stop stop-color="#125b4f" offset="1"/>
+</linearGradient>
+<linearGradient id="m" x1="4.5" x2="41.402" y1="777.94" y2="752.36" gradientUnits="userSpaceOnUse">
+<stop stop-color="#0b575a" offset="0"/>
+<stop stop-color="#70dcf2" offset="1"/>
+</linearGradient>
+<linearGradient id="l" x1="40.975" x2="42.08" y1="789.41" y2="766.03" gradientUnits="userSpaceOnUse">
+<stop stop-color="#2f1d00" offset="0"/>
+<stop stop-color="#f1d36d" offset="1"/>
+</linearGradient>
+<linearGradient id="k" x1="64" x2="59.5" y1="762.41" y2="786.31" gradientUnits="userSpaceOnUse">
+<stop stop-color="#e88864" offset="0"/>
+<stop stop-color="#f18b33" offset=".99819"/>
+</linearGradient>
+<linearGradient id="j" x1="29.411" x2="47.2" y1="798.02" y2="756.86" gradientUnits="userSpaceOnUse">
+<stop stop-color="#c51414" offset="0"/>
+<stop stop-color="#dd3410" offset="1"/>
+</linearGradient>
+<linearGradient id="i" x1="37.69" x2="37.461" y1="805.77" y2="783.05" gradientUnits="userSpaceOnUse">
+<stop stop-color="#6e4100" offset="0"/>
+<stop stop-color="#ff8603" offset="1"/>
+</linearGradient>
+<linearGradient id="h" x1="31.739" x2="37.52" y1="784.87" y2="768.29" gradientUnits="userSpaceOnUse">
+<stop stop-color="#8f5402" offset="0"/>
+<stop stop-color="#f1b04d" offset="1"/>
+</linearGradient>
+<linearGradient id="g" x1="37.69" x2="46.391" y1="805.77" y2="782" gradientUnits="userSpaceOnUse">
+<stop stop-color="#241800" offset="0"/>
+<stop stop-color="#fcbd29" offset="1"/>
+</linearGradient>
+<linearGradient id="f" x1="30.783" x2="35.357" y1="797.42" y2="779.28" gradientUnits="userSpaceOnUse">
+<stop stop-color="#640e00" offset="0"/>
+<stop stop-color="#fd9d75" offset=".99819"/>
+</linearGradient>
+<linearGradient id="e" x1="42.895" x2="52.914" y1="804.76" y2="785.66" gradientUnits="userSpaceOnUse">
+<stop stop-color="#790310" offset="0"/>
+<stop stop-color="#ff3a11" offset="1"/>
+</linearGradient>
+<linearGradient id="d" x1="4.5" x2="43.438" y1="790.81" y2="773.52" gradientUnits="userSpaceOnUse">
+<stop stop-color="#0b2c64" offset="0"/>
+<stop stop-color="#007baa" offset="1"/>
+</linearGradient>
+<linearGradient id="c" x1="11.438" x2="22.745" y1="785.91" y2="774.97" gradientUnits="userSpaceOnUse">
+<stop stop-color="#092048" offset="0"/>
+<stop stop-color="#006f9a" offset="1"/>
+</linearGradient>
+<linearGradient id="b" x1="8.4286" x2="32" y1="773.66" y2="756.86" gradientUnits="userSpaceOnUse">
+<stop stop-color="#0a1c4b" offset="0"/>
+<stop stop-color="#2bccec" offset="1"/>
+</linearGradient>
+</defs>
+<g transform="translate(0 -752.36)" fill-rule="evenodd" stroke-linejoin="round">
+<rect x="4.5" y="756.86" width="55" height="55" ry="8.0181" color="#000000" fill="url(#n)" stroke="url(#a)"/>
+<path d="m11.964 779.95 4.3571-18.136 1.6786 39.546z" fill="url(#c)" stop-color="#000000" stroke="url(#b)" stroke-linecap="round" stroke-width="1px" style="-inkscape-stroke:none;font-variation-settings:normal"/>
+<path d="m16.321 761.82 1.6786 39.546 16.375-37.929z" fill="url(#d)" stop-color="#000000" stroke="url(#m)" stroke-linecap="round" stroke-width="1px" style="-inkscape-stroke:none;font-variation-settings:normal"/>
+<g stroke-linecap="round" stroke-width="1px">
+<path d="m49.107 786.2-23.929-1.8393 9.1964-20.929z" fill="url(#h)" stop-color="#000000" stroke="url(#l)" style="-inkscape-stroke:none;font-variation-settings:normal"/>
+<path d="m53.143 809.24-35.143-7.875 7.3332-16.986z" fill="url(#i)" stop-color="#000000" stroke="url(#g)" style="-inkscape-stroke:none;font-variation-settings:normal"/>
+<path d="m34.375 763.43 18.125-2.5893-3.3929 25.357z" fill="url(#j)" stop-color="#000000" stroke="url(#k)" style="-inkscape-stroke:none;font-variation-settings:normal"/>
+<path d="m49.107 786.2 4.0364 23.036-27.81-24.861z" fill="url(#e)" stop-color="#000000" stroke="url(#f)" style="-inkscape-stroke:none;font-variation-settings:normal"/>
+</g>
+</g>
+</svg>

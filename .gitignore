@@ -13,3 +13,6 @@ ucode.elf
 *.spv
 *.spva
 zbsgfxpack.lua
+_install
+downloaded_resources/
+camera_paths.json

@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-FileCopyrightText: Copyright (c) 2022-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<component type="desktop-application">
+  <id>com.github.pknowles.VKLOD-Sample</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>Apache-2.0</project_license>
+  <name>VKLOD Sample</name>
+  <summary>Streaming and Ray Tracing Continuous Level of Detail</summary>
+
+  <description>
+    <p>
+      VKLOD Sample is a Vulkan application that renders large scenes with real-time ray
+      tracing using NVIDIA RTX Mega Geometry. It streams continuous level of detail
+      from disk, similar to Nanite's virtual geometry but designed for ray tracing.
+    </p>
+    <p>Requires an NVIDIA RTX GPU with support for the VK_NV_cluster_acceleration_structure Vulkan extension.</p>
+    <p>Key features:</p>
+    <ul>
+      <li>Real-time ray tracing with NVIDIA RTX Mega Geometry</li>
+      <li>Continuous level of detail (LOD) streaming from disk</li>
+      <li>Cluster acceleration structures for dynamic ray tracing</li>
+      <li>Per-mesh cluster selection for to reduce BLAS usage</li>
+      <li>Batched streaming system for smoother framerate</li>
+    </ul>
+  </description>
+
+  <developer id="com.github.pknowles">
+    <name>Pyarelal Knowles</name>
+  </developer>
+
+  <launchable type="desktop-id">com.github.pknowles.VKLOD-Sample.desktop</launchable>
+
+  <screenshots>
+    <screenshot type="default">
+      <caption>VKLOD Sample ray tracing continuous level of detail</caption>
+      <image>https://raw.githubusercontent.com/pknowles/VKLOD-Sample/main/doc/clusters.jpg</image>
+    </screenshot>
+  </screenshots>
+
+  <url type="homepage">https://github.com/pknowles/VKLOD-Sample</url>
+  <url type="bugtracker">https://github.com/pknowles/VKLOD-Sample/issues</url>
+  <url type="vcs-browser">https://github.com/pknowles/VKLOD-Sample</url>
+
+  <provides>
+    <binary>VKLOD-Sample_app</binary>
+  </provides>
+
+  <content_rating type="oars-1.1" />
+
+  <releases>
+    <release version="1.0.0" date="2025-11-13">
+      <description>
+        <p>Initial independent and first binary release forked from NVIDIA-RTX/VKLOD-Sample</p>
+      </description>
+    </release>
+  </releases>
+
+  <requires>
+    <display_length compare="ge">800</display_length>
+    <internet>offline-only</internet>
+  </requires>
+
+  <recommends>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </recommends>
+
+  <categories>
+    <category>Graphics</category>
+    <category>Development</category>
+    <category>Science</category>
+  </categories>
+
+  <keywords>
+    <keyword>vulkan</keyword>
+    <keyword>ray tracing</keyword>
+    <keyword>rtx</keyword>
+    <keyword>nvidia</keyword>
+    <keyword>lod</keyword>
+    <keyword>streaming</keyword>
+    <keyword>3d</keyword>
+    <keyword>graphics</keyword>
+    <keyword>rendering</keyword>
+  </keywords>
+</component>

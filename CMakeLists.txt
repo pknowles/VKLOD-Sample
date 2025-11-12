@@ -209,7 +209,7 @@ file(RELATIVE_PATH DLSS_RELPATH_FROM_SOURCE "${CMAKE_SOURCE_DIR}" "${_DLSS_LIB_D
 # nvpro_core modifies RUNTIME_OUTPUT_DIRECTORY, which includes a generator expression
 #file(RELATIVE_PATH DLSS_RELPATH_FROM_BINARY "${CMAKE_BINARY_DIR}" "${_DLSS_LIB_DIR}")
 file(RELATIVE_PATH DLSS_RELPATH_FROM_BINARY "${OUTPUT_PATH}/ConfigSubpath" "${_DLSS_LIB_DIR}")
-target_compile_definitions(${SAMPLE_EXECUTABLE} PRIVATE 
+target_compile_definitions(${SAMPLE_EXECUTABLE} PRIVATE
   DLSS_RELPATH_FROM_INSTALL="."
   # Workaround for DLSS_USE_DEVELOP_LIBRARIES. Use dev for Debug builds, rel for others
   DLSS_RELPATH_FROM_SOURCE="${DLSS_RELPATH_FROM_SOURCE}/../$<IF:$<CONFIG:Debug>,dev,rel>"
@@ -323,8 +323,12 @@ target_compile_definitions(${SAMPLE_EXECUTABLE} PRIVATE
 # Defines executable install() targets
 _finalize_target(${SAMPLE_EXECUTABLE})
 
+# Undo the _app suffix added by nvpro_core
+set_target_properties(${SAMPLE_EXECUTABLE} PROPERTIES SUFFIX "")
+
 # Install shaders, including some shared headers from nvpro_core. Unlike some
 # samples, these are loaded at runtime and not embedded in the binary
+# NOTE: this continues the nvpro_core convention of installing to ./_install
 file(GLOB NVPRO_CORE_GLSL_FILES ${BASE_DIRECTORY}/nvpro_core/nvvkhl/shaders/*)
 install(FILES ${GLSL_FILES} CONFIGURATIONS Release DESTINATION "bin_${ARCH}/GLSL_${SAMPLE_EXECUTABLE}")
 install(FILES ${GLSL_FILES} CONFIGURATIONS Debug DESTINATION "bin_${ARCH}_debug/GLSL_${SAMPLE_EXECUTABLE}")
@@ -332,7 +336,92 @@ install(FILES ${NVPRO_CORE_GLSL_FILES} CONFIGURATIONS Release DESTINATION "bin_$
 install(FILES ${NVPRO_CORE_GLSL_FILES} CONFIGURATIONS Debug DESTINATION "bin_${ARCH}_debug/GLSL_${SAMPLE_EXECUTABLE}/nvvkhl/shaders")
 install(FILES ${DLSS_DLLS} CONFIGURATIONS Release DESTINATION "bin_${ARCH}")
 install(FILES ${DLSS_DLLS} CONFIGURATIONS Debug DESTINATION "bin_${ARCH}_debug")
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/doc/icon.png CONFIGURATIONS Release DESTINATION "bin_${ARCH}/media")
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/doc/icon.png CONFIGURATIONS Debug DESTINATION "bin_${ARCH}_debug/media")
 
 # Debug in the source directory to avoid having a set of relative shader include
 # paths just for debugging with visual studio
 set_property(TARGET ${SAMPLE_EXECUTABLE} PROPERTY VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+
+# Custom rule to create a more portable AppImage
+# To build: cmake --build <build_dir> --target appimage
+if(UNIX AND CMAKE_BUILD_TYPE STREQUAL "Release")
+  set(APPIMAGE_OUTPUT "${CMAKE_BINARY_DIR}/${SAMPLE_EXECUTABLE}.AppImage")
+  set(APPIMAGE_TOOL "${CMAKE_BINARY_DIR}/appimagetool-x86_64.AppImage")
+  set(APPDIR "${CMAKE_BINARY_DIR}/AppDir")
+
+  # Media files for dependency tracking
+  file(GLOB_RECURSE MEDIA_FILES "${DOWNLOAD_TARGET_DIR}/bunny_v2/*")
+
+  # Generate an AppRun script
+  set(APPRUN_SCRIPT "${CMAKE_BINARY_DIR}/AppRun")
+  file(WRITE "${APPRUN_SCRIPT}" "#!/bin/sh\ncd \"$(dirname \"$0\")\"\n./${SAMPLE_EXECUTABLE} \"$@\"\n")
+  file(CHMOD "${APPRUN_SCRIPT}" PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE)
+
+  # Download appimagetool
+  if(NOT EXISTS "${APPIMAGE_TOOL}")
+    message(STATUS "Downloading appimagetool...")
+    file(DOWNLOAD
+         "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage"
+         "${APPIMAGE_TOOL}"
+         SHOW_PROGRESS)
+    file(CHMOD "${APPIMAGE_TOOL}" PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE)
+  endif()
+
+  # Create the AppImage
+  add_custom_command(
+      OUTPUT "${APPIMAGE_OUTPUT}"
+      # Clean and create AppDir
+      COMMAND ${CMAKE_COMMAND} -E rm -rf "${APPDIR}"
+      COMMAND ${CMAKE_COMMAND} -E make_directory "${APPDIR}"
+
+      # Copy executable, shaders, libraries, media
+      # TODO: if only we could use RUNTIME_DEPENDENCIES or
+      # GET_RUNTIME_DEPENDENCIES, but the nvpro_core use of CMAKE_INSTALL_PREFIX
+      # makes this difficult to do at the same time.
+      COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:${SAMPLE_EXECUTABLE}>" "${APPDIR}/"
+      COMMAND ${CMAKE_COMMAND} -E make_directory "${APPDIR}/GLSL_${SAMPLE_EXECUTABLE}"
+      COMMAND ${CMAKE_COMMAND} -E copy ${GLSL_FILES} "${APPDIR}/GLSL_${SAMPLE_EXECUTABLE}/"
+      COMMAND ${CMAKE_COMMAND} -E make_directory "${APPDIR}/GLSL_${SAMPLE_EXECUTABLE}/nvvkhl/shaders"
+      COMMAND ${CMAKE_COMMAND} -E copy ${NVPRO_CORE_GLSL_FILES} "${APPDIR}/GLSL_${SAMPLE_EXECUTABLE}/nvvkhl/shaders/"
+      COMMAND ${CMAKE_COMMAND} -E copy ${DLSS_DLLS} "${APPDIR}/"
+      COMMAND ${CMAKE_COMMAND} -E copy ${Vulkan_LIBRARY} "${APPDIR}/"
+      COMMAND ${CMAKE_COMMAND} -E make_directory "${APPDIR}/media"
+      COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_SOURCE_DIR}/doc/icon.png" "${APPDIR}/media/"
+      COMMAND ${CMAKE_COMMAND} -E copy_directory "${DOWNLOAD_TARGET_DIR}/bunny_v2" "${APPDIR}/media/bunny_v2"
+
+      # Copy launch script and metadata
+      COMMAND ${CMAKE_COMMAND} -E copy "${APPRUN_SCRIPT}" "${APPDIR}/AppRun"
+      COMMAND ${CMAKE_COMMAND} -E make_directory "${APPDIR}/usr/share/applications/"
+      COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_SOURCE_DIR}/package/VKLOD-Sample.desktop" "${APPDIR}/usr/share/applications/com.github.pknowles.VKLOD-Sample.desktop"
+      # symlink as per the docs https://docs.appimage.org/reference/appdir.html#usr-subdirectory
+      COMMAND ${CMAKE_COMMAND} -E create_symlink "usr/share/applications/com.github.pknowles.VKLOD-Sample.desktop" "${APPDIR}/com.github.pknowles.VKLOD-Sample.desktop"
+      COMMAND ${CMAKE_COMMAND} -E make_directory "${APPDIR}/usr/share/metainfo/"
+      COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_SOURCE_DIR}/package/VKLOD-Sample.appdata.xml" "${APPDIR}/usr/share/metainfo/com.github.pknowles.VKLOD-Sample.appdata.xml"
+      COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_SOURCE_DIR}/doc/icon.png" "${APPDIR}/.DirIcon"
+      COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_SOURCE_DIR}/doc/icon.svg" "${APPDIR}/${SAMPLE_EXECUTABLE}.svg"
+
+      # Make the AppImage package and clean up
+      COMMAND "${APPIMAGE_TOOL}" "${APPDIR}" "${APPIMAGE_OUTPUT}"
+      COMMAND ${CMAKE_COMMAND} -E rm -rf "${APPDIR}"
+
+      DEPENDS ${SAMPLE_EXECUTABLE}
+              ${GLSL_FILES}
+              ${NVPRO_CORE_GLSL_FILES}
+              ${DLSS_DLLS}
+              ${Vulkan_LIBRARY}
+              "${APPRUN_SCRIPT}"
+              "${CMAKE_SOURCE_DIR}/doc/icon.svg"
+              "${CMAKE_SOURCE_DIR}/doc/icon.png"
+              "${CMAKE_SOURCE_DIR}/package/VKLOD-Sample.desktop"
+              "${CMAKE_SOURCE_DIR}/package/VKLOD-Sample.appdata.xml"
+              ${MEDIA_FILES}
+      COMMENT "Creating ${APPIMAGE_OUTPUT}"
+  )
+
+  # appimage target that depends on the output file
+  add_custom_target(appimage
+      DEPENDS "${APPIMAGE_OUTPUT}"
+  )
+endif()
+

@@ -823,7 +823,7 @@ class ScopedDebugLabel
 public:
   [[nodiscard]] explicit ScopedDebugLabel(VkCommandBuffer      cmd,
                                           const std::string&   label,
-                                          std::array<float, 4> color = {1.0f, 1.0f, 1.0f, 1.0f})
+                                          std::array<float, 4> color = {{1.0f, 1.0f, 1.0f, 1.0f}})
       : m_cmd(cmd)
       , m_nvtxRange(label.c_str())  // mark the CPU work too
   {

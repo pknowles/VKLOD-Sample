@@ -102,6 +102,11 @@ inline std::vector<const wchar_t*> makeWcharPtrs(const std::vector<std::wstring>
 
 struct FeatureDiscovery
 {
+#if defined(NDEBUG)
+  static constexpr NVSDK_NGX_Logging_Level minLoggingLevel = NVSDK_NGX_LOGGING_LEVEL_OFF;
+#else
+  static constexpr NVSDK_NGX_Logging_Level minLoggingLevel = NVSDK_NGX_LOGGING_LEVEL_ON;  // NVSDK_NGX_LOGGING_LEVEL_VERBOSE
+#endif
   std::wstring                   applicationDataPath;
   std::vector<std::wstring>      ngxSearchPaths;
   std::vector<const wchar_t*>    ngxSearchPathPtrs;
@@ -124,7 +129,7 @@ struct FeatureDiscovery
                         fprintf(stderr, "NGX: %s (level %u, feature %u)", message,
                                 loggingLevel, sourceComponent);
                     },*/
-                .MinimumLoggingLevel      = NVSDK_NGX_LOGGING_LEVEL_ON, //NVSDK_NGX_LOGGING_LEVEL_VERBOSE,
+                .MinimumLoggingLevel      = minLoggingLevel,
                 .DisableOtherLoggingSinks = {},
             },
         }

@@ -302,10 +302,22 @@ void CameraPath::onUIRender()
 
 }  // namespace camera_paths
 
+template <typename T>
+std::optional<T> envVar(const char* name)
+{
+  const char* value = std::getenv(name);
+  return value ? std::make_optional<T>(value) : std::nullopt;
+}
+
+inline std::filesystem::path cameraPathsJsonPath()
+{
+  return envVar<std::filesystem::path>("APPIMAGE").value_or(nvh::getExecutablePath()).parent_path() / CameraPathsElement::PathsFilename;
+}
+
 CameraPathsElement::CameraPathsElement()
 {
-  if(std::filesystem::exists(PathsFilename))
-    for(auto ipath : nlohmann::json::parse(std::ifstream{PathsFilename}))
+  if(std::filesystem::exists(cameraPathsJsonPath()))
+    for(auto ipath : nlohmann::json::parse(std::ifstream{cameraPathsJsonPath()}))
       m_cameraPaths.emplace_back(ipath);
   m_cameraPathIndex = m_cameraPaths.empty() ? -1 : 0;
 }
@@ -317,7 +329,7 @@ CameraPathsElement::~CameraPathsElement()
     nlohmann::json outputJson;
     for(const auto& path : m_cameraPaths)
       outputJson.push_back(path.toJSON());
-    std::ofstream outFile(PathsFilename);
+    std::ofstream outFile(cameraPathsJsonPath());
     outFile << outputJson.dump(4);  // Write JSON with 4-space indentation
     outFile.close();
   }

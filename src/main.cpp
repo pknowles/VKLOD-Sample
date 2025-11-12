@@ -1073,6 +1073,13 @@ private:
   bool                                          m_showSettings           = true;
 };
 
+template <typename T>
+std::optional<T> envVar(const char* name)
+{
+  const char* value = std::getenv(name);
+  return value ? std::make_optional<T>(value) : std::nullopt;
+}
+
 int main(int argc, char** argv)
 {
   try
@@ -1082,14 +1089,31 @@ int main(int argc, char** argv)
     enableValidation = true;
 #endif
 
+    // Paths outside the AppImage, if packaged
+    // See: https://docs.appimage.org/packaging-guide/environment-variables.html
+    auto outsideExePath = envVar<fs::path>("APPIMAGE").value_or(nvh::getExecutablePath()).parent_path();
+    auto currentPath    = envVar<fs::path>("OWD").value_or(fs::current_path());
+
+    // Set log file to write outside AppImage (if packaged) - do this BEFORE any logging!
+    {
+      fs::path logPath = outsideExePath / (nvh::getExecutablePath().stem().string() + "_log.txt");
+      nvprintSetLogFileName(logPath.string().c_str());
+    }
+
     // Parse command line arguments
-    fs::path                 exeDirectoryPath   = nvh::getExecutablePath().parent_path();
+    fs::path insideExePath = nvh::getExecutablePath().parent_path();  // inside the AppImage, if packaged
     std::vector<std::string> defaultSearchPaths = {
-        fs::absolute(exeDirectoryPath / PROJECT_DOWNLOAD_RELDIRECTORY).string(),  // regular build
-        fs::absolute(exeDirectoryPath / "media").string(),                        // install build
+        fs::absolute(insideExePath / PROJECT_DOWNLOAD_RELDIRECTORY).string(),  // regular build
+        fs::absolute(insideExePath / "media").string(),                        // install build
     };
+    LOGI("Search paths:\n");
+    for(auto& path : defaultSearchPaths)
+    {
+      LOGI("  '%s'\n", path.c_str());
+    }
+
     std::string gltfPath  = nvh::findFile("bunny_v2/bunny.gltf", defaultSearchPaths);
-    std::string cacheDir  = fs::current_path().string();  // or fs::temp_directory_path()?
+    std::string cacheDir  = currentPath.string();  // or fs::temp_directory_path()?
     bool        printHelp = false;
     nvh::CommandLineParser args("vk_continuous_lod_clusters - a vulkan sample to demo continuous level of detail with ray tracing");
     args.addArgument({"-m", "--mesh"}, &gltfPath, "Mesh filename (*.gltf) or 'generated'");
@@ -1101,6 +1125,10 @@ int main(int argc, char** argv)
     {
       args.printHelp();
       return printHelp ? EXIT_SUCCESS : EXIT_FAILURE;
+    }
+    if(gltfPath.empty())
+    {
+      LOGI("Default bunny not found. Falling back to generated scene.\n");
     }
     if(gltfPath == "generated")
     {
@@ -1192,9 +1220,9 @@ int main(int argc, char** argv)
     ngx::FeatureDiscovery dlssDiscoveryInfo(0xdeadbeefull, nvh::getExecutablePath().parent_path().wstring(),
                                             NVSDK_NGX_Feature_RayReconstruction,
                                             {
-                                                std::wstring_view(L"" DLSS_RELPATH_FROM_INSTALL),
-                                                std::wstring_view(L"" DLSS_RELPATH_FROM_SOURCE),
-                                                std::wstring_view(L"" DLSS_RELPATH_FROM_BINARY),
+                                                fs::absolute(DLSS_RELPATH_FROM_INSTALL).lexically_normal().wstring(),
+                                                fs::absolute(DLSS_RELPATH_FROM_SOURCE).lexically_normal().wstring(),
+                                                fs::absolute(DLSS_RELPATH_FROM_BINARY).lexically_normal().wstring(),
                                             });
     for(const auto& ext : ngx::requiredInstanceExtensions(dlssDiscoveryInfo))
     {
@@ -1270,6 +1298,25 @@ int main(int argc, char** argv)
     {
       // Create the application
       nvvkhl::Application app(spec);
+
+      // Override ImGui ini file to write outside AppImage (if packaged)
+      // HACK: call LoadIniSettingsFromDisk() again to override
+      // the one in nvvkhl::Application::init()
+      static std::string s_imguiIniFilename = (outsideExePath / (nvh::getExecutablePath().stem().string() + ".ini")).string();
+      ImGui::GetIO().IniFilename = s_imguiIniFilename.c_str();
+      ImGui::LoadIniSettingsFromDisk(s_imguiIniFilename.c_str());
+
+      // Just because I made one for appimage anyway
+      std::optional<Image> icon;
+      auto                 iconPath = nvh::findFile("icon.png", defaultSearchPaths);
+      if(!iconPath.empty())
+        icon = createImage(iconPath, false);
+      if(icon)
+      {
+        GLFWimage image{int(icon->extent.width), int(icon->extent.height),
+                        const_cast<unsigned char*>(reinterpret_cast<const unsigned char*>(icon->data.data()))};
+        glfwSetWindowIcon(app.getWindowHandle(), 1, &image);
+      }
 
       // Initialize the large fonts and rebuild the fonts as the application
       // calls ImGUI::CreateContext() and sets up its own fonts
