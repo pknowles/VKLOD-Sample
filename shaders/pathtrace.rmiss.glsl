@@ -80,9 +80,9 @@ void main()
   }
   payload.radiance += payload.transmittance * sky_color;
 
-#if 0
+#if 1
   payload.albedoMetalness = u8vec4(sky_color * 255.0, 0.0);
-  payload.normalRoughness = u8vec4((-gl_WorldRayDirectionEXT * 0.5 + 0.5) * 255.0, 0.0);
+  payload.normalRoughness = u8vec4((-gl_WorldRayDirectionEXT * 0.5 + 0.5) * 255.0, 255.0);
 #endif
 #endif
 }

@@ -17,75 +17,111 @@
 
 #pragma once
 
-// Mostly forked from nvpro_core/imgui/imgui_helper.cpp to provide a font with a
-// larger size to use in the HUD
+// Mostly forked from nvpro_core/imgui/imgui_helper.cpp to provide fonts with
+// different sizes for use in the HUD and UI
 
-#include <filesystem>
 #include <imgui.h>
-#include <imgui/imgui_icon.h>
+#include <nvpro_core_legacy/imgui/imgui_icon.h>
 #include <nvvkhl/Roboto-Regular.h>
 
-namespace fs = std::filesystem;
-
-class LargeFont
-{
-public:
-  static ImFont* instance()
-  {
-    static LargeFont largeFont;
-    return largeFont;
-  }
-
-private:
-  LargeFont()
-  {
-    ImGuiIO& io = ImGui::GetIO();
-
-    ImFontConfig font_config{};
-    font_config.SizePixels           = 40.0f;
-    font_config.FontDataOwnedByAtlas = false;
-
-    // From nvpro_core/nvvkhl/application.cpp and nvpro_core/nvvkhl/Roboto-Regular.h
-    m_largeFont = io.Fonts->AddFontFromMemoryTTF(const_cast<uint8_t*>(g_Roboto_Regular), sizeof(g_Roboto_Regular),
-                                                 font_config.SizePixels, &font_config);
-  }
-
-  operator ImFont*() const { return m_largeFont; }
-
-private:
-  ImFont* m_largeFont = nullptr;
-};
-
-// Hack: provide declaration from imgui_icon.cpp
+// Provide declaration from imgui_icon.cpp
 const char* getOpenIconicFontCompressedBase85TTF();
 
-class LargeIconFont
+// Create a large Roboto font (40px) for HUD overlay text
+inline ImFont* createLargeFont(ImGuiIO& io)
 {
-public:
-  static ImFont* instance()
-  {
-    static LargeIconFont largeIconFont;
-    return largeIconFont;
-  }
+  ImFontConfig font_config{};
+  font_config.SizePixels           = 40.0f;
+  font_config.FontDataOwnedByAtlas = false;
 
-private:
-  LargeIconFont()
-  {
-    ImGuiIO& io = ImGui::GetIO();
+  return io.Fonts->AddFontFromMemoryTTF(const_cast<uint8_t*>(g_Roboto_Regular),
+                                        sizeof(g_Roboto_Regular),
+                                        font_config.SizePixels, &font_config);
+}
 
-    ImFontConfig font_config{};
-    font_config.SizePixels           = 20.0f;
-    font_config.FontDataOwnedByAtlas = false;
+// Create a large icon font (20px) for icon buttons
+inline ImFont* createLargeIconFont(ImGuiIO& io)
+{
+  ImFontConfig font_config{};
+  font_config.SizePixels           = 20.0f;
+  font_config.FontDataOwnedByAtlas = false;
 
-    const char*           glyphsData = getOpenIconicFontCompressedBase85TTF();
-    static uint16_t const range[]    = {0xE000, 0xE0DF, 0};
+  const char*           glyphsData = getOpenIconicFontCompressedBase85TTF();
+  static uint16_t const range[]    = {0xE000, 0xE0DF, 0};
 
-    m_largeIconFont = io.Fonts->AddFontFromMemoryCompressedBase85TTF(glyphsData, font_config.SizePixels, &font_config,
-                                                                     (const ImWchar*)range);
-  }
+  return io.Fonts->AddFontFromMemoryCompressedBase85TTF(
+      glyphsData, font_config.SizePixels, &font_config, (const ImWchar*)range);
+}
 
-  operator ImFont*() const { return m_largeIconFont; }
+// Setup default font (Roboto) with icons merged in
+inline ImFont* createDefaultFontWithIcons(ImGuiIO& io, float fontSize = 14.0f)
+{
+  // Load Roboto as the default font
+  ImFontConfig font_config{};
+  font_config.FontDataOwnedByAtlas = false;
+  ImFont* defaultFont =
+      io.Fonts->AddFontFromMemoryTTF(const_cast<uint8_t*>(g_Roboto_Regular),
+                                     sizeof(g_Roboto_Regular), fontSize, &font_config);
 
-private:
-  ImFont* m_largeIconFont = nullptr;
+  // Merge icon font into the default font
+  ImFontConfig icon_config{};
+  icon_config.MergeMode              = true;  // Merge into previous font
+  icon_config.FontDataOwnedByAtlas   = false;
+  static uint16_t const icon_range[] = {0xE000, 0xE0DF, 0};
+  io.Fonts->AddFontFromMemoryCompressedBase85TTF(getOpenIconicFontCompressedBase85TTF(),
+                                                 fontSize, &icon_config,
+                                                 (const ImWchar*)icon_range);
+
+  return defaultFont;
+}
+
+// Non-owning pointers to extra fonts (owned by ImGui font atlas)
+struct ExtraFonts
+{
+  ImFont* large     = nullptr;  // 40px Roboto for HUD overlay
+  ImFont* largeIcon = nullptr;  // 20px OpenIconic for icon buttons
 };
+
+// Initialize all extra fonts - call during ImGui font setup, before atlas is built
+inline ExtraFonts initExtraFonts(ImGuiIO& io)
+{
+  return ExtraFonts{
+      .large     = createLargeFont(io),
+      .largeIcon = createLargeIconFont(io),
+  };
+}
+
+// Helper function for creating styled toggle icon buttons
+// Returns true if the button was pressed
+inline bool iconButton(ImFont*       iconFont,
+                       const char*   icon,
+                       bool          isActive,
+                       const char*   tooltipOn,
+                       const char*   tooltipOff,
+                       const ImVec4& activeColor =
+                           ImVec4(118.0f / 255.0f, 185.0f / 255.0f, 0.0f / 255.0f, 1.0f))
+{
+  ImGui::PushFont(iconFont);
+  if(isActive)
+  {
+    ImGui::PushStyleColor(ImGuiCol_Button, activeColor);
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                          ImVec4(activeColor.x * 1.2f, activeColor.y * 1.2f,
+                                 activeColor.z * 1.2f, activeColor.w));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,
+                          ImVec4(activeColor.x * 0.8f, activeColor.y * 0.8f,
+                                 activeColor.z * 0.8f, activeColor.w));
+  }
+  bool pressed = ImGui::Button(icon);
+  if(isActive)
+  {
+    ImGui::PopStyleColor(3);
+  }
+  ImGui::PopFont();
+  if(ImGui::IsItemHovered())
+  {
+    ImGui::SetTooltip("%s", isActive ? tooltipOn : tooltipOff);
+  }
+  ImGui::SameLine();
+  return pressed;
+}

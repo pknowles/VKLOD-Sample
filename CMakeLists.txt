@@ -22,13 +22,13 @@ set(SOURCE_FILES
   src/acceleration_structures.cpp
   src/acceleration_structures.hpp
   src/gltf_view.hpp
+  src/imgui_docking_helper.hpp
   src/lod_streaming_jobs.cpp
   src/lod_streaming_jobs.hpp
   src/lod_streaming_scene.cpp
   src/lod_streaming_scene.hpp
   src/lod_traverser.cpp
   src/lod_traverser.hpp
-  src/main.cpp
   src/meshops_array_view.h
   src/debug_range_summary.hpp
   src/renderer_common.cpp
@@ -40,12 +40,15 @@ set(SOURCE_FILES
   src/sample_allocation.hpp
   src/sample_camera_paths.hpp
   src/sample_camera_paths.cpp
-  src/sample_app_element.hpp
   src/sample_glsl_compiler.hpp
   src/sample_image.hpp
   src/sample_producer_consumer.hpp
+  src/sample_profiler.hpp
+  src/sample_profiler.cpp
   src/sample_raytracing_objects.hpp
   src/sample_vulkan_objects.hpp
+  src/sample_vulkan_context.cpp
+  src/sample_vulkan_context.hpp
   src/scene.cpp
   src/scene.hpp
   src/nvhiz_vk.cpp
@@ -53,82 +56,226 @@ set(SOURCE_FILES
   src/generate_mesh.cpp
   src/generate_mesh.hpp
   src/mesh_util.hpp
-  src/sample_dlss_objects.hpp
+  src/platform_utils.hpp
+  src/main.cpp
   )
 
 file(GLOB GLSL_FILES shaders/*.*)
-source_group("Shaders" FILES ${GLSL_FILES})
+file(GLOB NVPRO_CORE_LEGACY_SHADERS nvpro_core_legacy/nvvkhl/shaders/*.*)
+source_group("Shaders" FILES ${GLSL_FILES} ${NVPRO_CORE_LEGACY_SHADERS})
 
-# Look for nvpro_core 1) as a sub-folder 2) at some other locations
-if(NOT BASE_DIRECTORY)
-  find_path(BASE_DIRECTORY
-    NAMES nvpro_core/cmake/setup.cmake
-    PATHS ${CMAKE_CURRENT_SOURCE_DIR}/external ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_SOURCE_DIR}/../..
-    REQUIRED
-    DOC "Directory containing nvpro_core"
+include(FetchContent)
+
+# Find GLFW for window management (needed by imgui)
+find_package(glfw3 QUIET)
+if(NOT glfw3_FOUND)
+  FetchContent_Declare(
+    glfw
+    GIT_REPOSITORY https://github.com/glfw/glfw.git
+    GIT_TAG 3.4
+    GIT_SHALLOW TRUE
+    OVERRIDE_FIND_PACKAGE
   )
+  set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+  set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+  set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+  FetchContent_MakeAvailable(glfw)
 endif()
 
-# Include nvpro_core makefiles
-if(EXISTS ${BASE_DIRECTORY}/nvpro_core/cmake/setup.cmake)
-  include(${BASE_DIRECTORY}/nvpro_core/cmake/setup.cmake)
-  include(${BASE_DIRECTORY}/nvpro_core/cmake/utilities.cmake)
-else()
-  message(FATAL_ERROR "could not find base directory, please set BASE_DIRECTORY to folder containing nvpro_core")
+# Use vulkan_objects instead of nvpro_core
+set(DECODELESS_SEARCH_DEPENDENCIES OFF)
+set(DECODELESS_FETCH_DEPENDENCIES ON)
+set(BUILD_DECODELESS_TESTING OFF)
+
+set(VULKAN_OBJECTS_FETCH_VMA ON)
+set(VULKAN_OBJECTS_FETCH_SHADERC ON)  # continue using the glsl compiler that was used before
+set(VULKAN_OBJECTS_FETCH_SLANG OFF CACHE BOOL "")  # We'll use shaderc instead, but don't force it off
+set(VULKAN_OBJECTS_FETCH_VVL ON)  # Useful for debugging validation layer errors
+add_subdirectory(vulkan_objects)
+
+FetchContent_Declare(
+  imgui
+  GIT_REPOSITORY https://github.com/ocornut/imgui.git
+  GIT_TAG v1.92.5-docking
+  GIT_SHALLOW TRUE
+  OVERRIDE_FIND_PACKAGE
+)
+FetchContent_MakeAvailable(imgui)
+
+# Build imgui as a static library
+add_library(imgui_static STATIC 
+  ${imgui_SOURCE_DIR}/imgui.cpp
+  ${imgui_SOURCE_DIR}/imgui_draw.cpp
+  ${imgui_SOURCE_DIR}/imgui_tables.cpp
+  ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+  ${imgui_SOURCE_DIR}/imgui_demo.cpp
+  ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
+  ${imgui_SOURCE_DIR}/backends/imgui_impl_vulkan.cpp
+  ${imgui_SOURCE_DIR}/misc/cpp/imgui_stdlib.cpp
+)
+target_compile_definitions(imgui_static PUBLIC 
+  IMGUI_DEFINE_MATH_OPERATORS
+  IMGUI_IMPL_VULKAN_NO_PROTOTYPES
+)
+target_include_directories(imgui_static PUBLIC 
+  ${imgui_SOURCE_DIR}
+  ${imgui_SOURCE_DIR}/backends
+)
+target_link_libraries(imgui_static PUBLIC glfw Vulkan::Headers)
+set_property(TARGET imgui_static PROPERTY FOLDER "ThirdParty")
+if(MSVC)
+  target_compile_options(imgui_static PRIVATE /w)
 endif()
 
-# Download the bunny as the default mesh to load
-download_files(FILENAMES bunny_v2.zip EXTRACT)
+# Alias for compatibility with ImGuiFileDialog expecting imgui::imgui
+if(NOT TARGET imgui::imgui)
+  add_library(imgui::imgui ALIAS imgui_static)
+endif()
 
-# Set a default CMAKE_INSTALL_PREFIX for nvpro samples
-_add_project_definitions(${SAMPLE_EXECUTABLE})
+# The nvpro_core_legacy directory and target contains dependencies copied from
+# the archived https://github.com/nvpro-samples/nvpro_core, before porting most
+# of the vulkan utilities to vulkan_objects
+add_library(nvpro_core_legacy_static STATIC
+  nvpro_core_legacy/nvvkhl/tonemap_postprocess.cpp
+  nvpro_core_legacy/fileformats/texture_formats.cpp
+  nvpro_core_legacy/fileformats/nv_dds.cpp
+  nvpro_core_legacy/fileformats/nv_ktx.cpp
+  nvpro_core_legacy/imgui/imgui_icon.cpp
+)
+target_include_directories(nvpro_core_legacy_static PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}
+  ${CMAKE_CURRENT_SOURCE_DIR}/nvpro_core_legacy
+  ${CMAKE_CURRENT_SOURCE_DIR}/nvpro_core_legacy/third_party/dxh/include/directx
+)
+target_link_libraries(nvpro_core_legacy_static
+  PUBLIC
+    vulkan_objects
+    glm::glm
+    imgui_static
+)
+target_compile_definitions(nvpro_core_legacy_static PUBLIC
+  NVP_SUPPORTS_VULKANSDK
+)
 
-file(RELATIVE_PATH NVPRO_CORE_DIR ${CMAKE_CURRENT_SOURCE_DIR} ${BASE_DIRECTORY}/nvpro_core/)
+# Disable C5246 warning for nvpro_core_legacy (legacy code doesn't use C++20
+# aggregate init style)
+if(MSVC)
+  target_compile_options(nvpro_core_legacy_static PRIVATE /wd5246)
+endif()
 
-# Enable NVTX markers for nsight systems profiling
-set(SUPPORT_NVTOOLSEXT ON)
+# Fetch implot
+FetchContent_Declare(
+  implot
+  GIT_REPOSITORY https://github.com/epezent/implot.git
+  GIT_TAG v0.17
+  GIT_SHALLOW TRUE
+  OVERRIDE_FIND_PACKAGE
+)
+FetchContent_MakeAvailable(implot)
+add_library(implot_static STATIC
+    ${implot_SOURCE_DIR}/implot.cpp
+    ${implot_SOURCE_DIR}/implot_items.cpp
+)
+target_compile_definitions(implot_static PRIVATE IMPLOT_IMPLEMENTATION)
+target_include_directories(implot_static PUBLIC ${implot_SOURCE_DIR})
+target_link_libraries(implot_static PRIVATE imgui_static)
+set_property(TARGET implot_static PROPERTY FOLDER "ThirdParty")
 
-# Turn on extra nvpro_core features (the same lib can be referenced with
-# multiple configurations). Some _add_package_*() nvpro_core specializations
-# alter the implementation, in which case samples are requested to compile extra
-# source files rather than compile extra static libraries or an all-in-one
-# nvpro_core lib. This is done with COMMON_SOURCE_FILES, PACKAGE_SOURCE_FILES,
-# PLATFORM_LIBRARIES, LIBRARIES_DEBUG and LIBRARIES_OPTIMIZED.
-_add_package_VulkanSDK()
-_add_package_ShaderC()
-_add_package_ImGUI()
-_add_package_NVToolsExt()
-_add_nvpro_core_lib()
+# Fetch ImGuiFileDialog
+FetchContent_Declare(
+  ImGuiFileDialog
+  GIT_REPOSITORY https://github.com/aiekick/ImGuiFileDialog.git
+  GIT_TAG v0.6.8
+  GIT_SHALLOW TRUE
+  OVERRIDE_FIND_PACKAGE
+)
+FetchContent_MakeAvailable(ImGuiFileDialog)
+target_link_libraries(ImGuiFileDialog PUBLIC imgui_static)
+set_property(TARGET ImGuiFileDialog PROPERTY FOLDER "ThirdParty")
+
+# Fetch args for command line parsing
+FetchContent_Declare(
+  args
+  GIT_REPOSITORY https://github.com/Taywee/args.git
+  GIT_TAG 6.4.7
+  GIT_SHALLOW TRUE
+  OVERRIDE_FIND_PACKAGE
+)
+set(ARGS_BUILD_EXAMPLE OFF CACHE BOOL "" FORCE)
+set(ARGS_BUILD_UNITTESTS OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(args)
+
+# Find NVToolsExt for profiling
+find_package(NVToolsExt QUIET)
+if(NVToolsExt_FOUND)
+  add_definitions(-DNVP_SUPPORTS_NVTOOLSEXT)
+endif()
+
+# Download the bunny as the default mesh to load (optional)
+set(DOWNLOAD_TARGET_DIR "${CMAKE_BINARY_DIR}/downloaded_resources")
+if(NOT EXISTS "${DOWNLOAD_TARGET_DIR}/bunny_v2.zip")
+  message(STATUS "Attempting to download bunny_v2.zip (optional default mesh)...")
+  file(DOWNLOAD
+    "https://developer.download.nvidia.com/ProGraphics/nvpro-samples/bunny_v2.zip"
+    "${DOWNLOAD_TARGET_DIR}/bunny_v2.zip"
+    STATUS DOWNLOAD_STATUS
+    TIMEOUT 10
+  )
+  list(GET DOWNLOAD_STATUS 0 DOWNLOAD_RESULT)
+  if(NOT DOWNLOAD_RESULT EQUAL 0)
+    message(WARNING "Could not download bunny_v2.zip (offline or timeout).")
+  endif()
+endif()
+
+if(EXISTS "${DOWNLOAD_TARGET_DIR}/bunny_v2.zip" AND NOT EXISTS "${DOWNLOAD_TARGET_DIR}/bunny_v2")
+  message(STATUS "Extracting bunny_v2.zip...")
+  execute_process(
+    COMMAND ${CMAKE_COMMAND} -E tar xzf "${DOWNLOAD_TARGET_DIR}/bunny_v2.zip"
+    WORKING_DIRECTORY "${DOWNLOAD_TARGET_DIR}"
+    RESULT_VARIABLE EXTRACT_RESULT
+  )
+  if(NOT EXTRACT_RESULT EQUAL 0)
+    message(WARNING "Failed to extract bunny_v2.zip")
+  endif()
+endif()
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/cmake")
-set(DLSS_VERSION "310.4.0")
-find_package(NGX REQUIRED)
+find_package(Threads REQUIRED)
 
+set(BUILD_NV_CLUSTER_LOD_BUILDER_TESTING OFF CACHE BOOL "" FORCE)
+set(BUILD_NV_CLUSTER_BUILDER_TESTING OFF CACHE BOOL "" FORCE)
 add_subdirectory(nv_cluster_lod_builder)
 
-add_library(vma_static src/vma_impl.cpp)
-target_link_libraries(vma_static PUBLIC vma)  # nvpro_core exports header-only 'vma'
-set_property(TARGET vma_static PROPERTY FOLDER "ThirdParty")
 
+# Add cgltf implementation
 if(NOT TARGET cgltf_static)
+  FetchContent_Declare(
+    cgltf
+    GIT_REPOSITORY https://github.com/jkuhlmann/cgltf.git
+    GIT_TAG v1.13
+    GIT_SHALLOW TRUE
+    OVERRIDE_FIND_PACKAGE
+  )
+  FetchContent_MakeAvailable(cgltf)
   add_library(cgltf_static src/cgltf_impl.cpp)
-  target_link_libraries(cgltf_static PUBLIC cgltf)  # nvpro_core exports header-only 'cgltf'
+  target_include_directories(cgltf_static PUBLIC ${cgltf_SOURCE_DIR})
   set_property(TARGET cgltf_static PROPERTY FOLDER "ThirdParty")
 endif()
 
+# Add stb_image implementation
+FetchContent_Declare(
+  stb
+  GIT_REPOSITORY https://github.com/nothings/stb.git
+  GIT_TAG f1c79c02822848a9bed4315b12c8c8f3761e1296
+  GIT_SHALLOW TRUE
+  OVERRIDE_FIND_PACKAGE
+)
+FetchContent_MakeAvailable(stb)
 add_library(stb_image_static src/stb_image_impl.cpp)
-target_link_libraries(stb_image_static PUBLIC stb)  # nvpro_core exports header-only 'stb'
+target_include_directories(stb_image_static PUBLIC ${stb_SOURCE_DIR})
 set_property(TARGET stb_image_static PROPERTY FOLDER "ThirdParty")
 
-# nvpro_core has some configuration dependent source files it expects
-# applications to compile. These are built separately as warnings in this
-# project are too strict.
-add_library(nvpro_core_extra
-  ${COMMON_SOURCE_FILES}
-  ${PACKAGE_SOURCE_FILES})
-target_link_libraries(nvpro_core_extra PUBLIC nvpro_core)
-
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_executable(${SAMPLE_EXECUTABLE}
@@ -147,13 +294,23 @@ if(MSVC)
         /w44355 # warning C4355: 'this': used in base member initializer list
         /w45246 # warning C5246: '_Elems': the initialization of a subobject should be wrapped in braces
 
-        # Ignore nvpro_core header warnings from /W4
+        # Ignore external header warnings from /W4
         /experimental:external /external:W3
-        /external:I${BASE_DIRECTORY}/nvpro_core/
-        /external:I${BASE_DIRECTORY}/nvpro_core/nvp
-        /external:I${BASE_DIRECTORY}/nvpro_core/nvvk
-        /external:I${BASE_DIRECTORY}/nvpro_core/nvvkhl
-        #/external:templates-  # can't enable due to nvvk::PushComputeDispatcher
+        
+        # Mark nvpro_core_legacy as external to suppress its warnings
+        /external:I ${CMAKE_CURRENT_SOURCE_DIR}/nvpro_core_legacy
+        
+        # Mark imgui as external to suppress its warnings
+        "/external:I$<SHELL_PATH:${imgui_SOURCE_DIR}>"
+
+        # Don't default to buggy parallel builds... like why is this not just on?
+        /FS
+
+        # Extra compile error diagnostics
+        /diagnostics:caret
+
+        # Static analysis, ignoring external headers
+        /analyze /analyze:external-
     )
     target_compile_definitions(${SAMPLE_EXECUTABLE} PRIVATE WIN32_LEAN_AND_MEAN=1 NOMINMAX)
     set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT ${SAMPLE_EXECUTABLE})
@@ -166,7 +323,7 @@ else()
         -Werror
 
         # Strange false positives/bug?
-        -Wno-maybe-uninitialized
+        $<$<CXX_COMPILER_ID:GNU>:-Wno-maybe-uninitialized>
     )
 
     set_property(SOURCE src/renderer_rasterize.cpp APPEND_STRING PROPERTY COMPILE_OPTIONS
@@ -181,163 +338,234 @@ else()
         #$<$<CONFIG:Debug>:_GLIBCXX_DEBUG_BACKTRACE> # DANGER: ABI breaking!
     )
 
-    # Ignore warnings from nvpro_core headers
+    # Ignore warnings from external headers
     target_include_directories(${SAMPLE_EXECUTABLE} SYSTEM PRIVATE
-      ${NVPRO_CORE_DIR}
-      ${NVPRO_CORE_DIR}/third_party/glm
-      ${Vulkan_INCLUDE_DIR})
+      ${vulkan_headers_INCLUDE_DIR}
+      ${imgui_SOURCE_DIR}
+      )
 
     if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
         # for when you write too much code without building
-        target_compile_options(${SAMPLE_EXECUTABLE} PRIVATE -fmax-errors=5)
+        #target_compile_options(${SAMPLE_EXECUTABLE} PRIVATE -fmax-errors=5)
 
         # Optional: faster repeat gdb launch at cost of post-build step
-        if (CMAKE_BUILD_TYPE STREQUAL "Debug")
-            add_custom_command(TARGET ${SAMPLE_EXECUTABLE} POST_BUILD
-                COMMAND gdb-add-index $<TARGET_FILE:${SAMPLE_EXECUTABLE}>
-                COMMENT "gdb-add-index ${SAMPLE_EXECUTABLE}"
-            )
-        endif()
+        #if (CMAKE_BUILD_TYPE STREQUAL "Debug")
+        #    add_custom_command(TARGET ${SAMPLE_EXECUTABLE} POST_BUILD
+        #        COMMAND gdb-add-index $<TARGET_FILE:${SAMPLE_EXECUTABLE}>
+        #        COMMENT "gdb-add-index ${SAMPLE_EXECUTABLE}"
+        #    )
+        #endif()
     endif()
 endif()
 
 # Compute relative paths to DLSS dynamic libraries with variables from
 # FindNGX.cmake
+find_package(NGX REQUIRED)
+if(NOT TARGET ngx OR NOT DLSS_DLLS)
+  message(FATAL_ERROR "Failed to download/find DLSS binaries")
+endif()
 list(GET DLSS_DLLS 0 _DLSS_FIRST_DLL)
 get_filename_component(_DLSS_LIB_DIR "${_DLSS_FIRST_DLL}" DIRECTORY)
-file(RELATIVE_PATH DLSS_RELPATH_FROM_SOURCE "${CMAKE_SOURCE_DIR}" "${_DLSS_LIB_DIR}")
-# nvpro_core modifies RUNTIME_OUTPUT_DIRECTORY, which includes a generator expression
-#file(RELATIVE_PATH DLSS_RELPATH_FROM_BINARY "${CMAKE_BINARY_DIR}" "${_DLSS_LIB_DIR}")
-file(RELATIVE_PATH DLSS_RELPATH_FROM_BINARY "${OUTPUT_PATH}/ConfigSubpath" "${_DLSS_LIB_DIR}")
+get_filename_component(_DLSS_LIB_PARENT_DIR "${_DLSS_LIB_DIR}" DIRECTORY)
+file(RELATIVE_PATH DLSS_PARENT_RELPATH_FROM_SOURCE "${CMAKE_SOURCE_DIR}" "${_DLSS_LIB_PARENT_DIR}")
+
 target_compile_definitions(${SAMPLE_EXECUTABLE} PRIVATE
   DLSS_RELPATH_FROM_INSTALL="."
   # Workaround for DLSS_USE_DEVELOP_LIBRARIES. Use dev for Debug builds, rel for others
-  DLSS_RELPATH_FROM_SOURCE="${DLSS_RELPATH_FROM_SOURCE}/../$<IF:$<CONFIG:Debug>,dev,rel>"
-  DLSS_RELPATH_FROM_BINARY="${DLSS_RELPATH_FROM_BINARY}/../$<IF:$<CONFIG:Debug>,dev,rel>"
+  DLSS_RELPATH_FROM_SOURCE="${DLSS_PARENT_RELPATH_FROM_SOURCE}/$<IF:$<CONFIG:Debug>,dev,rel>"
+  DLSS_RELPATH_FROM_BINARY="$<PATH:RELATIVE_PATH,${_DLSS_LIB_PARENT_DIR}/$<IF:$<CONFIG:Debug>,dev,rel>,$<TARGET_FILE_DIR:${SAMPLE_EXECUTABLE}>>"
+  DOWNLOAD_RELPATH_FROM_BINARY="$<PATH:RELATIVE_PATH,${DOWNLOAD_TARGET_DIR},$<TARGET_FILE_DIR:${SAMPLE_EXECUTABLE}>>"
+  # Relative paths to shader directories from the binary location (for running from build dir)
+  SHADER_DIR_RELPATH_FROM_BINARY="$<PATH:RELATIVE_PATH,${CMAKE_SOURCE_DIR}/shaders,$<TARGET_FILE_DIR:${SAMPLE_EXECUTABLE}>>"
+  NVPRO_LEGACY_RELPATH_FROM_BINARY="$<PATH:RELATIVE_PATH,${CMAKE_SOURCE_DIR}/nvpro_core_legacy,$<TARGET_FILE_DIR:${SAMPLE_EXECUTABLE}>>"
+  INSTALL_SUBDIRECTORY="media"
   )
 
 target_precompile_headers(${SAMPLE_EXECUTABLE} PRIVATE
+  # Standard library
   <algorithm>
   <any>
   <array>
-  <assert.h>
+  <atomic>
   <bit>
-  <cgltf.h>
+  <chrono>
+  <cmath>
   <condition_variable>
   <cstddef>
   <cstdint>
   <cstdlib>
   <deque>
+  <exception>
   <filesystem>
+  <format>
+  <fstream>
   <functional>
-  <glm/glm.hpp>
-  <glm/gtc/type_ptr.hpp>
-  <glm/gtx/hash.hpp>
-  <imgui.h>
-  <imgui/imgui_camera_widget.h>
-  <imgui/imgui_helper.h>
+  <future>
   <initializer_list>
+  <iomanip>
   <iostream>
+  <limits>
+  <map>
   <memory>
   <memory_resource>
-  <meshops_array_view.h>
   <mutex>
-  <nvh/alignment.hpp>
-  <nvh/commandlineparser.hpp>
-  <nvh/nvprint.hpp>
-  <nvvk/commands_vk.hpp>
-  <nvvk/compute_vk.hpp>
-  <nvvk/debug_util_vk.hpp>
-  <nvvk/dynamicrendering_vk.hpp>
-  <nvvkhl/alloc_vma.hpp>
-  <nvvkhl/application.hpp>
-  <nvvkhl/element_camera.hpp>
-  <nvvkhl/element_gui.hpp>
-  <nvvkhl/gbuffer.hpp>
-  <nvvkhl/glsl_compiler.hpp>
-  <nvvkhl/pipeline_container.hpp>
-  <nvvk/images_vk.hpp>
-  <nvvk/memallocator_vk.hpp>
-  <nvvk/memallocator_vma_vk.hpp>
-  <nvvk/pipeline_vk.hpp>
-  <nvvk/resourceallocator_vk.hpp>
-  <nvvk/sbtwrapper_vk.hpp>
-  <nvvk/stagingmemorymanager_vk.hpp>
+  <numeric>
   <optional>
   <ostream>
+  <print>
+  <queue>
   <ranges>
+  <ratio>
   <set>
   <span>
-  <stb_image.h>
+  <sstream>
   <stdexcept>
+  <string>
   <string_view>
-  <third_party/imgui/backends/imgui_impl_vulkan.h>
+  <thread>
   <type_traits>
   <unordered_map>
+  <unordered_set>
   <utility>
+  <variant>
   <vector>
+  # Third-party libraries
+  <GLFW/glfw3.h>
+  <backends/imgui_impl_glfw.h>
+  <backends/imgui_impl_vulkan.h>
+  <cgltf.h>
+  <glm/common.hpp>
+  <glm/glm.hpp>
+  <glm/gtc/matrix_transform.hpp>
+  <glm/gtc/noise.hpp>
+  <glm/gtc/random.hpp>
+  <glm/gtc/type_ptr.hpp>
+  <glm/gtx/euler_angles.hpp>
+  <glm/gtx/hash.hpp>
+  <glm/gtx/string_cast.hpp>
+  <imgui.h>
+  <imgui_internal.h>
+  <implot.h>
+  <meshops_array_view.h>
+  <shaderc/shaderc.hpp>
+  <stb_image.h>
   <vk_mem_alloc.h>
+  <vulkan/vulkan_core.h>
+  # vko (comment out if editing these frequently)
+  <vko/allocator.hpp>
+  <vko/bindings.hpp>
+  <vko/bound_buffer.hpp>
+  <vko/bound_image.hpp>
+  <vko/command_recording.hpp>
+  <vko/functions.hpp>
+  <vko/glfw_objects.hpp>
+  <vko/handles.hpp>
+  <vko/imgui_objects.hpp>
+  <vko/implot_objects.hpp>
+  <vko/nv_ngx.hpp>
+  <vko/query_pool.hpp>
+  <vko/ray_tracing.hpp>
+  <vko/shaderc_compiler.hpp>
+  <vko/shortcuts.hpp>
+  #<vko/staging_memory.hpp>
+  #<vko/swapchain.hpp>
+  <vko/timeline_queue.hpp>
   )
 
-set(DECODELESS_SEARCH_DEPENDENCIES OFF)
-set(DECODELESS_FETCH_DEPENDENCIES ON)
-set(BUILD_DECODELESS_TESTING OFF)
-include(FetchContent)
+# Fetch decodeless dependencies
 FetchContent_Declare(
   decodeless_offset_ptr
   GIT_REPOSITORY https://github.com/decodeless/offset_ptr.git
-  GIT_TAG 78693cb545ac155b9514c17caa4be671b791b8e5)
+  GIT_TAG 38ceefc6ce63fb4667cd207424b1277c3eed5f8d
+  GIT_SHALLOW TRUE
+  OVERRIDE_FIND_PACKAGE)
 FetchContent_MakeAvailable(decodeless_offset_ptr)
+FetchContent_Declare(
+  decodeless_allocator
+  GIT_REPOSITORY https://github.com/decodeless/allocator.git
+  GIT_TAG 035b142ff5cb016262ec1ce505e160caa5c30660
+  GIT_SHALLOW TRUE
+  OVERRIDE_FIND_PACKAGE)
+FetchContent_MakeAvailable(decodeless_allocator)
+FetchContent_Declare(
+  decodeless_mappedfile
+  GIT_REPOSITORY https://github.com/decodeless/mappedfile.git
+  GIT_TAG d3425b2508e76ed7a09e55f0c6b580b4107f04db
+  GIT_SHALLOW TRUE
+  OVERRIDE_FIND_PACKAGE)
+FetchContent_MakeAvailable(decodeless_mappedfile)
 FetchContent_Declare(
   decodeless_writer
   GIT_REPOSITORY https://github.com/decodeless/writer.git
-  GIT_TAG 6f9b747d7671afe2c7abd1d48c9d084402aec1d8)
+  GIT_TAG 6f9b747d7671afe2c7abd1d48c9d084402aec1d8
+  GIT_SHALLOW TRUE
+  OVERRIDE_FIND_PACKAGE)
 FetchContent_MakeAvailable(decodeless_writer)
 
-target_include_directories(${SAMPLE_EXECUTABLE} PRIVATE src)
+# Fetch GLM for math
+FetchContent_Declare(
+  glm
+  GIT_REPOSITORY https://github.com/g-truc/glm.git
+  GIT_TAG 1.0.2
+  GIT_SHALLOW TRUE
+  OVERRIDE_FIND_PACKAGE
+)
+FetchContent_MakeAvailable(glm)
+
+# Download https://github.com/scottt/debugbreak
+set(DEBUGBREAK_DIR "${CMAKE_BINARY_DIR}/debugbreak")
+set(DEBUGBREAK_HEADER "${DEBUGBREAK_DIR}/debugbreak.h")
+file(MAKE_DIRECTORY "${DEBUGBREAK_DIR}")
+if(NOT EXISTS "${DEBUGBREAK_HEADER}")
+    file(DOWNLOAD
+        "https://raw.githubusercontent.com/scottt/debugbreak/5dcbe41d2bd4712c8014aa7e843723ad7b40fd74/debugbreak.h"
+        "${DEBUGBREAK_HEADER}"
+        EXPECTED_HASH SHA256=f691efbd23848c927d9ee98d7b5264a86cf3a36607633b08bd6936f44e2b71c8
+        TLS_VERIFY ON
+    )
+endif()
+
+target_include_directories(${SAMPLE_EXECUTABLE} PRIVATE src shaders nvpro_core_legacy nvpro_core_legacy/nvtx3 ${DEBUGBREAK_DIR})
 
 target_link_libraries(${SAMPLE_EXECUTABLE}
-  nvpro_core
-  nvpro_core_extra
+  vulkan_objects
   vma_static
   nv_cluster_lod_builder
   cgltf_static
   stb_image_static
-  ${PLATFORM_LIBRARIES}
+  nvpro_core_legacy_static
+  imgui_static
+  implot_static
+  ImGuiFileDialog
+  glfw
+  glm::glm
+  args
   decodeless::writer
   decodeless::offset_ptr
-  ngx)
-target_link_libraries(${SAMPLE_EXECUTABLE} debug ${LIBRARIES_DEBUG})
-target_link_libraries(${SAMPLE_EXECUTABLE} optimized ${LIBRARIES_OPTIMIZED})
+  ngx
+  Threads::Threads)
+
+if(NVToolsExt_FOUND)
+  target_link_libraries(${SAMPLE_EXECUTABLE} NVToolsExt::NVToolsExt)
+endif()
+
+if(TARGET vulkan_objects_glfw_xcb)
+  target_link_libraries(${SAMPLE_EXECUTABLE} vulkan_objects_glfw_xcb) # contains workaround for native XCB
+endif()
 
 target_compile_definitions(${SAMPLE_EXECUTABLE} PRIVATE
-  NVPRO_CORE_DIR="${NVPRO_CORE_DIR}"
-
-  # Compile error from nvpro_core/nvp/perproject_globals.cpp without this,
-  # if _add_project_definitions() is commented out
-  PROJECT_NAME="${SAMPLE_EXECUTABLE}"
-
   GLM_FORCE_CTOR_INIT  # safety
+  GLM_ENABLE_EXPERIMENTAL
   )
 
-# Defines executable install() targets
-_finalize_target(${SAMPLE_EXECUTABLE})
-
-# Undo the _app suffix added by nvpro_core
-set_target_properties(${SAMPLE_EXECUTABLE} PROPERTIES SUFFIX "")
-
-# Install shaders, including some shared headers from nvpro_core. Unlike some
-# samples, these are loaded at runtime and not embedded in the binary
-# NOTE: this continues the nvpro_core convention of installing to ./_install
-file(GLOB NVPRO_CORE_GLSL_FILES ${BASE_DIRECTORY}/nvpro_core/nvvkhl/shaders/*)
-install(FILES ${GLSL_FILES} CONFIGURATIONS Release DESTINATION "bin_${ARCH}/GLSL_${SAMPLE_EXECUTABLE}")
-install(FILES ${GLSL_FILES} CONFIGURATIONS Debug DESTINATION "bin_${ARCH}_debug/GLSL_${SAMPLE_EXECUTABLE}")
-install(FILES ${NVPRO_CORE_GLSL_FILES} CONFIGURATIONS Release DESTINATION "bin_${ARCH}/GLSL_${SAMPLE_EXECUTABLE}/nvvkhl/shaders")
-install(FILES ${NVPRO_CORE_GLSL_FILES} CONFIGURATIONS Debug DESTINATION "bin_${ARCH}_debug/GLSL_${SAMPLE_EXECUTABLE}/nvvkhl/shaders")
-install(FILES ${DLSS_DLLS} CONFIGURATIONS Release DESTINATION "bin_${ARCH}")
-install(FILES ${DLSS_DLLS} CONFIGURATIONS Debug DESTINATION "bin_${ARCH}_debug")
-install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/doc/icon.png CONFIGURATIONS Release DESTINATION "bin_${ARCH}/media")
-install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/doc/icon.png CONFIGURATIONS Debug DESTINATION "bin_${ARCH}_debug/media")
+# Install shaders. Unlike some samples, these are loaded at runtime and not embedded in the binary
+set(CMAKE_INSTALL_PREFIX "${CMAKE_BINARY_DIR}/_install" CACHE PATH "Install path prefix")
+install(FILES ${GLSL_FILES} CONFIGURATIONS Release DESTINATION "bin_${CMAKE_SYSTEM_PROCESSOR}/GLSL_${SAMPLE_EXECUTABLE}")
+install(FILES ${GLSL_FILES} CONFIGURATIONS Debug DESTINATION "bin_${CMAKE_SYSTEM_PROCESSOR}_debug/GLSL_${SAMPLE_EXECUTABLE}")
+install(FILES ${DLSS_DLLS} CONFIGURATIONS Release DESTINATION "bin_${CMAKE_SYSTEM_PROCESSOR}")
+install(FILES ${DLSS_DLLS} CONFIGURATIONS Debug DESTINATION "bin_${CMAKE_SYSTEM_PROCESSOR}_debug")
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/doc/icon.png CONFIGURATIONS Release DESTINATION "bin_${CMAKE_SYSTEM_PROCESSOR}/media")
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/doc/icon.png CONFIGURATIONS Debug DESTINATION "bin_${CMAKE_SYSTEM_PROCESSOR}_debug/media")
 
 # Debug in the source directory to avoid having a set of relative shader include
 # paths just for debugging with visual studio
@@ -355,7 +583,7 @@ if(UNIX AND CMAKE_BUILD_TYPE STREQUAL "Release")
 
   # Generate an AppRun script
   set(APPRUN_SCRIPT "${CMAKE_BINARY_DIR}/AppRun")
-  file(WRITE "${APPRUN_SCRIPT}" "#!/bin/sh\ncd \"$(dirname \"$0\")\"\n./${SAMPLE_EXECUTABLE} \"$@\"\n")
+  file(WRITE "${APPRUN_SCRIPT}" "#!/bin/sh\nexport VK_ADD_LAYER_PATH=\".\${VK_ADD_LAYER_PATH:+:\$VK_ADD_LAYER_PATH}\"\ncd \"$(dirname \"$0\")\"\n./${SAMPLE_EXECUTABLE} \"$@\"\n")
   file(CHMOD "${APPRUN_SCRIPT}" PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE)
 
   # Download appimagetool
@@ -376,16 +604,14 @@ if(UNIX AND CMAKE_BUILD_TYPE STREQUAL "Release")
       COMMAND ${CMAKE_COMMAND} -E make_directory "${APPDIR}"
 
       # Copy executable, shaders, libraries, media
-      # TODO: if only we could use RUNTIME_DEPENDENCIES or
-      # GET_RUNTIME_DEPENDENCIES, but the nvpro_core use of CMAKE_INSTALL_PREFIX
-      # makes this difficult to do at the same time.
       COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:${SAMPLE_EXECUTABLE}>" "${APPDIR}/"
-      COMMAND ${CMAKE_COMMAND} -E make_directory "${APPDIR}/GLSL_${SAMPLE_EXECUTABLE}"
-      COMMAND ${CMAKE_COMMAND} -E copy ${GLSL_FILES} "${APPDIR}/GLSL_${SAMPLE_EXECUTABLE}/"
-      COMMAND ${CMAKE_COMMAND} -E make_directory "${APPDIR}/GLSL_${SAMPLE_EXECUTABLE}/nvvkhl/shaders"
-      COMMAND ${CMAKE_COMMAND} -E copy ${NVPRO_CORE_GLSL_FILES} "${APPDIR}/GLSL_${SAMPLE_EXECUTABLE}/nvvkhl/shaders/"
+      COMMAND ${CMAKE_COMMAND} -E make_directory "${APPDIR}/shaders"
+      COMMAND ${CMAKE_COMMAND} -E copy ${GLSL_FILES} "${APPDIR}/shaders/"
+      COMMAND ${CMAKE_COMMAND} -E make_directory "${APPDIR}/nvpro_core_legacy/nvvkhl/shaders"
+      COMMAND ${CMAKE_COMMAND} -E copy ${NVPRO_CORE_LEGACY_SHADERS} "${APPDIR}/nvpro_core_legacy/nvvkhl/shaders/"
       COMMAND ${CMAKE_COMMAND} -E copy ${DLSS_DLLS} "${APPDIR}/"
-      COMMAND ${CMAKE_COMMAND} -E copy ${Vulkan_LIBRARY} "${APPDIR}/"
+      COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:vvl>" "${APPDIR}/"  # 10mb extra for optional validation layers. worth it?
+      COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE_DIR:vvl>/VkLayer_khronos_validation.json" "${APPDIR}/"
       COMMAND ${CMAKE_COMMAND} -E make_directory "${APPDIR}/media"
       COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_SOURCE_DIR}/doc/icon.png" "${APPDIR}/media/"
       COMMAND ${CMAKE_COMMAND} -E copy_directory "${DOWNLOAD_TARGET_DIR}/bunny_v2" "${APPDIR}/media/bunny_v2"
@@ -407,9 +633,7 @@ if(UNIX AND CMAKE_BUILD_TYPE STREQUAL "Release")
 
       DEPENDS ${SAMPLE_EXECUTABLE}
               ${GLSL_FILES}
-              ${NVPRO_CORE_GLSL_FILES}
               ${DLSS_DLLS}
-              ${Vulkan_LIBRARY}
               "${APPRUN_SCRIPT}"
               "${CMAKE_SOURCE_DIR}/doc/icon.svg"
               "${CMAKE_SOURCE_DIR}/doc/icon.png"

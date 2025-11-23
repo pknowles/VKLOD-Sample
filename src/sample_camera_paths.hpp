@@ -16,14 +16,14 @@
  */
 #pragma once
 
+#include <camera.hpp>
+#include <filesystem>
 #include <glm/ext/quaternion_trigonometric.hpp>
 #include <glm/geometric.hpp>
 #include <glm/glm.hpp>
 #include <glm/gtx/string_cast.hpp>
 #include <imgui.h>
-#include <imgui/imgui_helper.h>
-#include <nvh/cameramanipulator.hpp>
-#include <nvvkhl/application.hpp>
+#include <stdexcept>
 #include <third_party/tinygltf/json.hpp>
 #include <vector>
 
@@ -47,23 +47,19 @@ T json_get(const nlohmann::json& j)
     throw std::runtime_error("JSON array size does not match GLM type");
   T value{};
   for(int i = 0; i < T::length(); ++i)
-    value[i] = j[i].get<typename T::value_type>();
+    value[i] = j[size_t(i)].get<typename T::value_type>();
   return value;
 }
 
 // All attributes to interpolate over time. Could be nicer to allow separate
 // timelines for each attribute.
-struct Keyframe
+struct Keyframe : Camera
 {
-  glm::vec3              position;
-  glm::quat              rotation;
-  float                  distance      = 1.0f;
-  float                  fov           = 80.0f;
-  float                  durationScale = 1.0f;  // TODO: should be stored outside as time between keyframes
-  static Keyframe        fromJSON(const nlohmann::json& keyframe);
-  static Keyframe        fromCamera(const nvh::CameraManipulator& camera);
-  void                   toCamera(nvh::CameraManipulator& camera);
-  nlohmann::json         toJSON() const;
+  float durationScale = 1.0f;  // TODO: should be stored outside as time between keyframes
+  static Keyframe fromJSON(const nlohmann::json& keyframe);
+  static Keyframe fromCamera(const Camera& camera);
+  void            toCamera(Camera& camera) const;
+  nlohmann::json  toJSON() const;
 };
 
 // An array of keyframes, a function to interpolate between them and UI controls
@@ -77,45 +73,67 @@ struct CameraPath
   float m_seekPosition = 0.0f;
   float cpScale        = 2.0f / 3.0f;
 
-  CameraPath(const char* newName);
-  CameraPath(const std::string& newName);
+  CameraPath(const std::string& newName, const Camera& sampleCamera);
   explicit CameraPath(const nlohmann::json& ipath);
   nlohmann::json toJSON() const;
   Keyframe       interpolate(float t);
-  void           onUIRender();
+  void           onUIRender(Camera& sampleCamera);
 };
 
 }  // namespace camera_paths
 
 // A window to create and edit multiple camera paths. Paths are read from a json
 // file when created and saved when destroyed.
-class CameraPathsElement : public nvvkhl::IAppElement
+class CameraPathsElement
 {
 public:
-  static constexpr const char* WindowName                       = "Camera Paths";
-  static constexpr const char* PathsFilename                    = "camera_paths.json";
+  static constexpr const char* WindowName    = "Camera Paths";
+  static constexpr const char* PathsFilename = "camera_paths.json";
+
   CameraPathsElement(const CameraPathsElement& other)           = delete;
   CameraPathsElement operator=(const CameraPathsElement& other) = delete;
-  CameraPathsElement();
+
+  CameraPathsElement(Camera& sampleCamera);
   ~CameraPathsElement();
+
+  // Query animation state
   bool saveFrames() const { return m_saveFrames && m_cameraAnimating; }
   int  animationFrame() const { return m_cameraAnimationFrame; }
+  bool isAnimating() const { return m_cameraAnimating; }
+
+  // Get the full path for a frame (AppImage-aware, uses OWD if inside AppImage)
+  std::filesystem::path framePath(int frameNum) const;
+
+  // Window visibility
   void toggleWindow() { m_showWindow = !m_showWindow; }
   bool isWindowVisible() const { return m_showWindow; }
+
+  // Main interface - call these each frame
+  void renderUI();  // Render the UI window
+  void update();    // Update camera animation if playing
 
 private:
   using time_point = std::chrono::high_resolution_clock::time_point;
   using duration   = std::chrono::high_resolution_clock::duration;
-  virtual void                          onUIRender() override;
-  virtual void                          onRender(VkCommandBuffer) override;
-  virtual void                          onUIMenu() override;
-  int                                   m_cameraPathIndex = -1;
+
+  camera_paths::CameraPath& currentPath()
+  {
+    if(size_t(m_cameraPathIndex) >= m_cameraPaths.size())
+    {
+      throw std::out_of_range("Bad CameraPath::m_cameraPathIndex");
+    }
+    return m_cameraPaths[size_t(m_cameraPathIndex)];
+  }
+
+  Camera*                               m_sampleCamera;
   std::vector<camera_paths::CameraPath> m_cameraPaths;
-  int                                   m_cameraPositionIndex  = -1;
+  int                                   m_cameraPathIndex      = -1;
   int                                   m_cameraAnimationFrame = 0;
   bool                                  m_saveFrames           = false;
   bool                                  m_cameraAnimating      = false;
   time_point                            m_cameraAnimateLastFrame;
-  duration                              m_cameraAnimatePosition = duration::zero();
-  bool                                  m_showWindow            = false;
+  duration    m_cameraAnimatePosition = duration::zero();
+  bool        m_showWindow            = false;
+  std::string m_frameSavePath = ".";      // Relative to CWD (OWD for AppImage)
+  std::string m_framePrefix   = "frame";  // Filename prefix
 };

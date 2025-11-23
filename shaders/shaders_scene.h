@@ -61,13 +61,11 @@ struct Instance
 
 struct Material
 {
-  vec4   albedo;
-  int8_t albedoTexture;
-  int8_t metallicRoughnessTexture;
-  int8_t padding2;
-  int8_t padding3;
-  float  roughness;
-  float  metallic;
+  vec4    albedo;
+  int16_t albedoTexture;
+  int16_t metallicRoughnessTexture;
+  float   roughness;
+  float   metallic;
 };
 
 struct ClusterGeometry

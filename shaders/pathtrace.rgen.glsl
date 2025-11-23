@@ -105,6 +105,10 @@ void main()
       if(payload.depth == 1)
       {
         firstHit = payload;
+#if 0
+        // Debugging. Imgui blends with gbuffer alpha
+        firstHit.albedoMetalness.a = uint8_t(255);
+#endif
         hitGeometry = payload.eventType != EVENT_TYPE_MISS;
       }
       else if(payload.depth == 2 && firstHit.eventType == EVENT_TYPE_SPECULAR)

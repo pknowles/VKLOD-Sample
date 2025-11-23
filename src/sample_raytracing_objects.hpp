@@ -31,12 +31,13 @@ namespace rt {
 class AccelerationStructureSizes
 {
 public:
-  AccelerationStructureSizes(ResourceAllocator*                                        allocator,
-                             VkAccelerationStructureTypeKHR                            type,
-                             VkBuildAccelerationStructureFlagsKHR                      flags,
-                             std::span<const VkAccelerationStructureGeometryKHR>       geometries,
+  template <vko::device_and_commands DeviceAndCommands>
+  AccelerationStructureSizes(const DeviceAndCommands&             device,
+                             VkAccelerationStructureTypeKHR       type,
+                             VkBuildAccelerationStructureFlagsKHR flags,
+                             std::span<const VkAccelerationStructureGeometryKHR> geometries,
                              std::span<const VkAccelerationStructureBuildRangeInfoKHR> rangeInfos)
-      : m_sizeInfo{.sType                     = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR,
+      : m_sizeInfo{.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR,
                    .pNext                     = nullptr,
                    .accelerationStructureSize = 0,
                    .updateScratchSize         = 0,
@@ -44,11 +45,11 @@ public:
   {
     assert(geometries.size() == rangeInfos.size());
     VkAccelerationStructureBuildGeometryInfoKHR buildGeometryInfo{
-        .sType                    = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
-        .pNext                    = nullptr,
-        .type                     = type,
-        .flags                    = flags,
-        .mode                     = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR,
+        .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
+        .pNext = nullptr,
+        .type  = type,
+        .flags = flags,
+        .mode  = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR,
         .srcAccelerationStructure = VK_NULL_HANDLE,
         .dstAccelerationStructure = VK_NULL_HANDLE,
         .geometryCount            = static_cast<uint32_t>(geometries.size()),
@@ -58,14 +59,23 @@ public:
     };
     std::vector<uint32_t> primitiveCounts(rangeInfos.size());
     std::transform(rangeInfos.begin(), rangeInfos.end(), primitiveCounts.begin(),
-                   [](const VkAccelerationStructureBuildRangeInfoKHR& rangeInfo) { return rangeInfo.primitiveCount; });
-    vkGetAccelerationStructureBuildSizesKHR(allocator->getDevice(), VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
-                                            &buildGeometryInfo, primitiveCounts.data(), &m_sizeInfo);
+                   [](const VkAccelerationStructureBuildRangeInfoKHR& rangeInfo) {
+                     return rangeInfo.primitiveCount;
+                   });
+    device.vkGetAccelerationStructureBuildSizesKHR(
+        device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+        &buildGeometryInfo, primitiveCounts.data(), &m_sizeInfo);
   }
-  const VkAccelerationStructureBuildSizesInfoKHR& operator*() const { return m_sizeInfo; }
-  VkAccelerationStructureBuildSizesInfoKHR&       operator*() { return m_sizeInfo; }
-  const VkAccelerationStructureBuildSizesInfoKHR* operator->() const { return &m_sizeInfo; }
-  VkAccelerationStructureBuildSizesInfoKHR*       operator->() { return &m_sizeInfo; }
+  const VkAccelerationStructureBuildSizesInfoKHR& operator*() const
+  {
+    return m_sizeInfo;
+  }
+  VkAccelerationStructureBuildSizesInfoKHR& operator*() { return m_sizeInfo; }
+  const VkAccelerationStructureBuildSizesInfoKHR* operator->() const
+  {
+    return &m_sizeInfo;
+  }
+  VkAccelerationStructureBuildSizesInfoKHR* operator->() { return &m_sizeInfo; }
 
 private:
   VkAccelerationStructureBuildSizesInfoKHR m_sizeInfo;
@@ -81,37 +91,44 @@ class AccelerationStructure
 {
 public:
   AccelerationStructure() = delete;
-  AccelerationStructure(ResourceAllocator*                              allocator,
-                        VkAccelerationStructureTypeKHR                  type,
+  template <vko::device_and_commands DeviceAndCommands, vko::allocator Allocator = vko::vma::Allocator>
+  AccelerationStructure(const DeviceAndCommands&       device,
+                        Allocator&                     allocator,
+                        VkAccelerationStructureTypeKHR type,
                         const VkAccelerationStructureBuildSizesInfoKHR& size,
                         VkAccelerationStructureCreateFlagsKHR           flags)
       : m_type(type)
       , m_sizes(size)
-      , m_buffer(allocator,
+      , m_buffer(device,
                  m_sizes.accelerationStructureSize,
-                 VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                 VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
-      , m_accelerationStructure(allocator->getDevice(),
+                 VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR
+                     | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                 VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                 allocator)
+      , m_accelerationStructure(device,
                                 VkAccelerationStructureCreateInfoKHR{
-                                    .sType         = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
-                                    .pNext         = nullptr,
-                                    .createFlags   = flags,
-                                    .buffer        = m_buffer,
-                                    .offset        = 0,
-                                    .size          = m_sizes.accelerationStructureSize,
-                                    .type          = m_type,
+                                    .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
+                                    .pNext       = nullptr,
+                                    .createFlags = flags,
+                                    .buffer      = m_buffer,
+                                    .offset      = 0,
+                                    .size = m_sizes.accelerationStructureSize,
+                                    .type = m_type,
                                     .deviceAddress = 0,
                                 })
   {
     VkAccelerationStructureDeviceAddressInfoKHR addressInfo{
-        .sType                 = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
+        .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
         .pNext                 = nullptr,
         .accelerationStructure = m_accelerationStructure,
     };
-    m_address = vkGetAccelerationStructureDeviceAddressKHR(allocator->getDevice(), &addressInfo);
+    m_address = device.vkGetAccelerationStructureDeviceAddressKHR(device, &addressInfo);
   }
-  const VkAccelerationStructureTypeKHR&           type() const { return m_type; }
-  const VkAccelerationStructureBuildSizesInfoKHR& sizes() const { return m_sizes; }
+  const VkAccelerationStructureTypeKHR& type() const { return m_type; }
+  const VkAccelerationStructureBuildSizesInfoKHR& sizes() const
+  {
+    return m_sizes;
+  }
 
 private:
   // Use the C++ type system to hide access to the object until it is built with
@@ -138,34 +155,39 @@ private:
 class BuiltAccelerationStructure
 {
 public:
-  BuiltAccelerationStructure(AccelerationStructure&&                                   accelerationStructure,
-                             VkBuildAccelerationStructureFlagsKHR                      flags,
-                             std::span<const VkAccelerationStructureGeometryKHR>       geometries,
+  template <vko::device_and_commands DeviceAndCommands>
+  BuiltAccelerationStructure(const DeviceAndCommands& device,
+                             AccelerationStructure&&  accelerationStructure,
+                             VkBuildAccelerationStructureFlagsKHR flags,
+                             std::span<const VkAccelerationStructureGeometryKHR> geometries,
                              std::span<const VkAccelerationStructureBuildRangeInfoKHR> rangeInfos,
-                             VkDeviceAddress                                           scratchBufferAddress,
-                             VkCommandBuffer                                           cmd)
+                             VkDeviceAddress scratchBufferAddress,
+                             VkCommandBuffer cmd)
       : m_accelerationStructure(std::move(accelerationStructure))
   {
-    build(flags, geometries, rangeInfos, false, scratchBufferAddress, cmd);
+    build(device, flags, geometries, rangeInfos, false, scratchBufferAddress, cmd);
   }
 
-  void build(VkBuildAccelerationStructureFlagsKHR                      flags,
-             std::span<const VkAccelerationStructureGeometryKHR>       geometries,
+  template <vko::device_and_commands DeviceAndCommands>
+  void build(const DeviceAndCommands&                            device,
+             VkBuildAccelerationStructureFlagsKHR                flags,
+             std::span<const VkAccelerationStructureGeometryKHR> geometries,
              std::span<const VkAccelerationStructureBuildRangeInfoKHR> rangeInfos,
-             bool                                                      update,
-             VkDeviceAddress                                           scratchBufferAddress,
-             VkCommandBuffer                                           cmd)
+             bool            update,
+             VkDeviceAddress scratchBufferAddress,
+             VkCommandBuffer cmd)
   {
     assert(geometries.size() == rangeInfos.size());
     assert(!update || !!(flags & VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR));
     VkBuildAccelerationStructureModeKHR mode =
-        update ? VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR : VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+        update ? VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR :
+                 VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
     VkAccelerationStructureBuildGeometryInfoKHR buildGeometryInfo{
-        .sType                    = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
-        .pNext                    = nullptr,
-        .type                     = m_accelerationStructure.type(),
-        .flags                    = flags,
-        .mode                     = mode,
+        .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
+        .pNext = nullptr,
+        .type  = m_accelerationStructure.type(),
+        .flags = flags,
+        .mode  = mode,
         .srcAccelerationStructure = update ? m_accelerationStructure.object() : VK_NULL_HANDLE,
         .dstAccelerationStructure = m_accelerationStructure.object(),
         .geometryCount            = static_cast<uint32_t>(geometries.size()),
@@ -174,7 +196,7 @@ public:
         .scratchData              = {.deviceAddress = scratchBufferAddress},
     };
     auto rangeInfosPtr = rangeInfos.data();
-    vkCmdBuildAccelerationStructuresKHR(cmd, 1, &buildGeometryInfo, &rangeInfosPtr);
+    device.vkCmdBuildAccelerationStructuresKHR(cmd, 1, &buildGeometryInfo, &rangeInfosPtr);
 
     // Since the scratch buffer is reused across builds, we need a barrier to ensure one build
     // is finished before starting the next one.
@@ -184,12 +206,19 @@ public:
         .srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
         .dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR,
     };
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-                         VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+    device.vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                                VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                                0, 1, &barrier, 0, nullptr, 0, nullptr);
   }
 
-                  operator VkAccelerationStructureKHR() const { return m_accelerationStructure.object(); }
-  VkDeviceSize    size_bytes() const { return m_accelerationStructure.sizes().accelerationStructureSize; }
+  operator VkAccelerationStructureKHR() const
+  {
+    return m_accelerationStructure.object();
+  }
+  VkDeviceSize sizeBytes() const
+  {
+    return m_accelerationStructure.sizes().accelerationStructureSize;
+  }
   VkDeviceAddress address() const { return m_accelerationStructure.address(); }
 
 private:

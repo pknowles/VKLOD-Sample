@@ -23,7 +23,6 @@
 #include <exception>
 #include <memory>
 #include <mutex>
-#include <nvvk/memallocator_vk.hpp>
 #include <set>
 #include <unordered_map>
 #include <vulkan/vulkan_core.h>
@@ -59,6 +58,12 @@ public:
   {
   }
 
+  ~PoolAllocator()
+  {
+    if(m_freeList.size() != 1 || m_freeList.begin()->size != m_bytesTotal)
+      std::println(stderr, "PoolAllocator destroyed before its allocations were freed");
+  }
+
   VkDeviceAddress allocate(VkDeviceSize userSize, VkDeviceSize align)
   {
     assert(userSize >= align);  // alignment should always be at least the size
@@ -66,7 +71,7 @@ public:
 
     VkDeviceSize allocSize = adjustSize(userSize);
 
-    //fmt::println("Allocating {} bytes for request of size {}", allocSize, userSize);
+    //std::println("Allocating {} bytes for request of size {}", allocSize, userSize);
 
     // Binary search to find free allocation
     auto it = m_freeList.lower_bound({0, allocSize});
@@ -105,19 +110,21 @@ public:
     Range range = {address, adjustSize(userSize)};  // match the adjustment done in allocate()
     assert(m_fragmentationInternal >= range.size - userSize);
     m_fragmentationInternal -= range.size - userSize;
-    if(auto joinEnd = m_freeListStarts.find(range.end()); joinEnd != m_freeListStarts.end())
+    if(auto joinEnd = m_freeListStarts.find(range.end());
+       joinEnd != m_freeListStarts.end())
     {
       Range joinWith = joinEnd->second;
       removeFreeRange(joinWith);
       range = {range.address, range.size + joinWith.size};
-      //fmt::println("Joined end of range at {}", range.address);
+      //std::println("Joined end of range at {}", range.address);
     }
-    if(auto joinStart = m_freeListEnds.find(range.address); joinStart != m_freeListEnds.end())
+    if(auto joinStart = m_freeListEnds.find(range.address);
+       joinStart != m_freeListEnds.end())
     {
       Range joinWith = joinStart->second;
       removeFreeRange(joinWith);
       range = {joinWith.address, range.size + joinWith.size};
-      //fmt::println("Joined start of range at {}", range.address);
+      //std::println("Joined start of range at {}", range.address);
     }
     try
     {
@@ -130,7 +137,10 @@ public:
     //fprintf(stderr, "Free list size: %zu\n", m_freeList.size());
   }
 
-  VkDeviceSize offsetOf(VkDeviceAddress address) const { return address - m_base; }
+  VkDeviceSize offsetOf(VkDeviceAddress address) const
+  {
+    return address - m_base;
+  }
   VkDeviceSize bytesAllocated() const
   {
     std::lock_guard lk(m_mutex);
@@ -147,7 +157,10 @@ public:
     std::lock_guard lk(m_mutex);
     return m_fragmentationExternal;
   }
-  VkDeviceSize fragmentation() const { return internalFragmentation() + externalFragmentation(); }
+  VkDeviceSize fragmentation() const
+  {
+    return internalFragmentation() + externalFragmentation();
+  }
 
 private:
   static VkDeviceSize adjustSize(VkDeviceSize size)
@@ -238,113 +251,4 @@ private:
   PoolAllocator*  m_allocator = nullptr;
   VkDeviceAddress m_address   = 0xffffffffffffffffull;
   VkDeviceSize    m_size      = 0;
-};
-
-class ScopedVmaAllocator
-{
-public:
-  ScopedVmaAllocator(const VmaAllocatorCreateInfo& createInfo) { vmaCreateAllocator(&createInfo, &m_handle); }
-  ~ScopedVmaAllocator() { free(); }
-  ScopedVmaAllocator(const ScopedVmaAllocator& other) = delete;
-  ScopedVmaAllocator(ScopedVmaAllocator&& other) noexcept
-      : m_handle(other.m_handle)
-  {
-    other.m_handle = nullptr;
-  }
-  ScopedVmaAllocator& operator=(const ScopedVmaAllocator& other) = delete;
-  ScopedVmaAllocator& operator=(ScopedVmaAllocator&& other) noexcept
-  {
-    free();
-    m_handle = nullptr;
-    std::swap(m_handle, other.m_handle);
-    return *this;
-  }
-  operator VmaAllocator() const { return m_handle; }
-
-private:
-  void free()
-  {
-    if(m_handle)
-      vmaDestroyAllocator(m_handle);
-  }
-  VmaAllocator m_handle = nullptr;
-};
-
-// A nvvk::VMAMemoryAllocator that owns its VmaAllocator. This works around
-// limitations of nvvk::AllocVma, which does not expose the nvvk::MemAllocator
-// interface needed to chain allocators.
-class VMAMemAllocator : public nvvk::VMAMemoryAllocator
-{
-public:
-  VMAMemAllocator(const VmaAllocatorCreateInfo& createInfo)
-      : VMAMemAllocator(createInfo.device, createInfo.physicalDevice, ScopedVmaAllocator(createInfo))
-  {
-  }
-  VMAMemAllocator(VkDevice device, VkPhysicalDevice physicalDevice, ScopedVmaAllocator&& vmaAllocator)
-      : nvvk::VMAMemoryAllocator(device, physicalDevice, vmaAllocator)
-      , m_vmaAllocator(std::move(vmaAllocator))
-  {
-  }
-
-private:
-  ScopedVmaAllocator m_vmaAllocator;
-};
-
-// An nvvk::ResourceAllocator that calls releaseStaging() in the destructor
-class ResourceAllocator : public nvvk::ResourceAllocator
-{
-public:
-  using nvvk::ResourceAllocator::ResourceAllocator;
-  virtual ~ResourceAllocator()
-  {
-    if(getStaging())
-      releaseStaging();
-  }
-};
-
-// Synchonized wrapper around nvvk::MemAllocator
-class SynchronizedMemAllocator : public nvvk::MemAllocator
-{
-public:
-  SynchronizedMemAllocator(std::unique_ptr<nvvk::MemAllocator> memAlloc)
-      : m_alloc(std::move(memAlloc))
-  {
-  }
-
-  virtual nvvk::MemHandle allocMemory(const nvvk::MemAllocateInfo& allocInfo, VkResult* pResult = nullptr) override
-  {
-    std::lock_guard lock(m_mutex);
-    return m_alloc->allocMemory(allocInfo, pResult);
-  }
-
-  virtual void freeMemory(nvvk::MemHandle memHandle) override
-  {
-    std::lock_guard lock(m_mutex);
-    m_alloc->freeMemory(memHandle);
-  }
-
-  virtual MemInfo getMemoryInfo(nvvk::MemHandle memHandle) const override
-  {
-    std::lock_guard lock(m_mutex);
-    return m_alloc->getMemoryInfo(memHandle);
-  }
-
-  virtual void* map(nvvk::MemHandle memHandle, VkDeviceSize offset = 0, VkDeviceSize size = VK_WHOLE_SIZE, VkResult* pResult = nullptr) override
-  {
-    std::lock_guard lock(m_mutex);
-    return m_alloc->map(memHandle, offset, size, pResult);
-  }
-
-  virtual void unmap(nvvk::MemHandle memHandle) override
-  {
-    std::lock_guard lock(m_mutex);
-    m_alloc->unmap(memHandle);
-  }
-
-  virtual VkDevice         getDevice() const override { return m_alloc->getDevice(); }
-  virtual VkPhysicalDevice getPhysicalDevice() const override { return m_alloc->getPhysicalDevice(); }
-
-private:
-  std::unique_ptr<nvvk::MemAllocator> m_alloc;
-  mutable std::mutex                  m_mutex;
 };

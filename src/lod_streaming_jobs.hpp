@@ -20,12 +20,11 @@
 #include <any>
 #include <deque>
 #include <memory_resource>
-#include <nvvk/compute_vk.hpp>
 #include <sample_glsl_compiler.hpp>
 #include <sample_raytracing_objects.hpp>
 #include <sample_vulkan_objects.hpp>
 #include <scene.hpp>
-#include <shaders/shaders_stream.h>
+#include <shaders_stream.h>
 #include <unordered_set>
 #include <vulkan/vulkan_core.h>
 
@@ -53,7 +52,7 @@ struct ClusterGroupVk
 class MakeRequestsProgram : public vkobj::SimpleComputePipeline<shaders::BuildRequestsConstants>
 {
 public:
-  MakeRequestsProgram(VkDevice device, SampleGlslCompiler& glslCompiler)
+  MakeRequestsProgram(const vko::Device& device, SampleGlslCompiler& glslCompiler)
       : vkobj::SimpleComputePipeline<shaders::BuildRequestsConstants>(device, glslCompiler, "stream_make_requests.comp.glsl")
   {
   }
@@ -62,7 +61,7 @@ public:
 class ModifyGroupsProgram : public vkobj::SimpleComputePipeline<shaders::StreamGroupsConstants>
 {
 public:
-  ModifyGroupsProgram(VkDevice device, SampleGlslCompiler& glslCompiler)
+  ModifyGroupsProgram(const vko::Device& device, SampleGlslCompiler& glslCompiler)
       : vkobj::SimpleComputePipeline<shaders::StreamGroupsConstants>(device, glslCompiler, "stream_modify_groups.comp.glsl")
   {
   }
@@ -71,7 +70,7 @@ public:
 class FillClasInputProgram : public vkobj::SimpleComputePipeline<shaders::FillClasInputConstants>
 {
 public:
-  FillClasInputProgram(VkDevice device, SampleGlslCompiler& glslCompiler)
+  FillClasInputProgram(const vko::Device& device, SampleGlslCompiler& glslCompiler)
       : vkobj::SimpleComputePipeline<shaders::FillClasInputConstants>(device, glslCompiler, "stream_fill_clas_input.comp.glsl")
   {
   }
@@ -80,7 +79,7 @@ public:
 class PackClasProgram : public vkobj::SimpleComputePipeline<shaders::PackClasConstants>
 {
 public:
-  PackClasProgram(VkDevice device, SampleGlslCompiler& glslCompiler)
+  PackClasProgram(const vko::Device& device, SampleGlslCompiler& glslCompiler)
       : vkobj::SimpleComputePipeline<shaders::PackClasConstants>(device, glslCompiler, "stream_pack_clas.comp.glsl")
   {
   }
@@ -92,20 +91,72 @@ public:
 class RequestList
 {
 public:
-  RequestList(ResourceAllocator* allocator, uint32_t maxRequests, VkCommandPool initPool, VkQueue initQueue);
-  void gather(MakeRequestsProgram&    program,
-              vkobj::Buffer<uint8_t>& groupNeededFlags,
-              vkobj::SemaphoreValue   promisedSubmitSemaphoreState,
-              VkCommandBuffer         cmd);
-  void download(ResourceAllocator* allocator, VkCommandPool pool, VkQueue queue, std::vector<shaders::GroupRequest>& result);
-  size_t memoryUsage() const { return m_requests.size_bytes() + m_requestCounts.size_bytes(); }
+  RequestList(const vko::Device&   device,
+              vko::vma::Allocator& allocator,
+              vkobj::Staging&      staging,
+              VkQueue              queue,
+              uint32_t             maxRequests);
+  void gather(const vko::Device&          device,
+              MakeRequestsProgram&        program,
+              vko::DeviceBuffer<uint8_t>& groupNeededFlags,
+              vko::SemaphoreValue         promisedSubmitSemaphoreState,
+              VkCommandBuffer             cmd);
+  void download(const vko::Device&                  device,
+                vkobj::Staging&                     staging,
+                std::vector<shaders::GroupRequest>& result)
+  {
+    result.clear();
+
+    // First download the request list count
+    uint32_t count;
+    {
+      // Download the single StreamRequestCounts struct
+      auto countFuture =
+          vko::download(staging, device, vko::BufferSpan(m_requestCounts).subspan(0, 1));
+
+      memoryBarrier(device, staging.commandBuffer(), VK_ACCESS_TRANSFER_READ_BIT,
+                    VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT);
+      device.vkCmdFillBuffer(staging.commandBuffer(), m_requestCounts,
+                             offsetof(shaders::StreamRequestCounts, requestsCount),
+                             sizeof(shaders::StreamRequestCounts::requestsCount),
+                             0);  // zero the count for buffer reuse
+
+      // Submit with custom wait semaphores for synchronization with render thread
+      std::array waits{m_readySemaphore.value().waitSemaphoreInfo(VK_PIPELINE_STAGE_2_TRANSFER_BIT)};
+      std::array<VkSemaphoreSubmitInfo, 0> noSignals{};
+      staging.submit(waits, noSignals);
+
+      // Take the min. requestsCount may overshoot due to parallel atomics. Note
+      // the future.get() here will block until the above submission completes.
+      count = std::min(m_maxRequests, countFuture.get(device)[0].requestsCount);
+    }
+
+    // Download the data, if there is any
+    if(count > 0u)
+    {
+      result.resize(count);
+      size_t offset         = 0;
+      auto   downloadHandle = vko::downloadForEach(
+          staging, device, vko::BufferSpan(m_requests).subspan(0, count),
+          [&result, &offset](VkDeviceSize, std::span<const shaders::GroupRequest> chunk) {
+            std::ranges::copy(chunk, result.begin() + std::ptrdiff_t(offset));
+            offset += chunk.size();
+          });
+      staging.submit();
+      downloadHandle.wait(device);
+    }
+  }
+  size_t memoryUsage() const
+  {
+    return m_requests.sizeBytes() + m_requestCounts.sizeBytes();
+  }
 
 private:
-  uint32_t                                    m_maxRequests;
-  vkobj::SemaphoreValue                       m_readySemaphore;  // render queue to streaming thread sync
-  vkobj::Buffer<shaders::GroupRequest>        m_requests;
-  vkobj::Buffer<shaders::StreamRequestCounts> m_requestCounts;  // single element
-  vkobj::ReadyCommandBuffer                   m_pendingGather;  // tmp storage for submitted command buffer
+  uint32_t m_maxRequests;
+  std::optional<vkobj::SemaphoreValue> m_readySemaphore;  // render queue to streaming thread sync
+  vko::DeviceBuffer<shaders::GroupRequest> m_requests;
+  vko::DeviceBuffer<shaders::StreamRequestCounts> m_requestCounts;  // single element
 };
 
 // A reusable GPU buffer of cluster groups to insert in or remove from the
@@ -116,35 +167,98 @@ private:
 class GroupModsList
 {
 public:
-  GroupModsList(ResourceAllocator* allocator, uint32_t maxLoadUnloads);
-  shaders::StreamGroupModsList write(ResourceAllocator*                    allocator,
-                                     std::span<const shaders::LoadGroup>   loads,
+  GroupModsList(const vko::Device& device, vko::vma::Allocator& allocator, uint32_t maxLoadUnloads);
+  template <typename StagingAllocator>
+  shaders::StreamGroupModsList write(const vko::Device& device,
+                                     StagingAllocator&  staging,
+                                     std::span<const shaders::LoadGroup> loads,
                                      std::span<const shaders::UnloadGroup> unloads,
-                                     std::span<const ClusteredMesh>        meshes,
-                                     std::span<const uint32_t>             meshInstanceCounts,
-                                     VkCommandBuffer                       cmd);
+                                     std::span<const ClusteredMesh> meshes,
+                                     std::span<const uint32_t> meshInstanceCounts)
+  {
+    // Make sure this object is not still being read from by the GPU after a
+    // previous call to modifyGroups()
+    if(m_reuseSemaphore)
+      m_reuseSemaphore->wait(device);
+
+    // Write the counts, which will be used to dispatch compute threads
+    m_groupModsList.loadGroupCount   = uint32_t(loads.size());
+    m_groupModsList.unloadGroupCount = uint32_t(unloads.size());
+
+    // Write the LoadGroup and UnloadGroup arrays that contain references to
+    // streamed data that must be added or removed
+    if(!loads.empty())
+      vko::upload(staging, device, loads, m_loads);
+    if(!unloads.empty())
+      vko::upload(staging, device, unloads, m_unloads);
+
+    // Record running totals of what was loaded and unloaded. This may be used to
+    // determine worst case allocations needed
+    m_clusterCountDelta         = 0;
+    m_instanceClusterCountDelta = 0;
+    for(const shaders::LoadGroup& load : loads)
+    {
+      assert(load.groupData.clusterCount
+             == meshes[load.meshIndex].groupClusterRanges[load.groupIndex].count);
+      m_clusterCountDelta += load.groupData.clusterCount;
+      m_instanceClusterCountDelta +=
+          load.groupData.clusterCount * meshInstanceCounts[load.meshIndex];
+    }
+    for(const shaders::UnloadGroup& unload : unloads)
+    {
+      uint32_t groupClusterCount =
+          meshes[unload.meshIndex].groupClusterRanges[unload.groupIndex].count;
+      m_clusterCountDelta -= groupClusterCount;
+      m_instanceClusterCountDelta -=
+          groupClusterCount * meshInstanceCounts[unload.meshIndex];
+      assert(unload.groupIndex
+             != uint32_t(meshes[unload.meshIndex].groupGeneratedGroups.size() - 1));  // should never unload root pages
+    }
+
+    // Debugging - check there are no duplicates between loads/unloads
+#if !defined(NDEBUG)
+    std::set<std::pair<uint32_t, uint32_t>> loadids;
+    std::set<std::pair<uint32_t, uint32_t>> unloadids;
+    for(const shaders::LoadGroup& load : loads)
+      loadids.insert({load.meshIndex, load.groupIndex});
+    for(const shaders::UnloadGroup& unload : unloads)
+      unloadids.insert({unload.meshIndex, unload.groupIndex});
+    for(const shaders::LoadGroup& load : loads)
+      assert(unloadids.count({load.meshIndex, load.groupIndex}) == 0);
+    for(const shaders::UnloadGroup& unload : unloads)
+      assert(loadids.count({unload.meshIndex, unload.groupIndex}) == 0);
+#endif
+
+    // Returns the uploaded structures, which contain cluster geometry and can be used
+    // to fill CLAS build input structures
+    return m_groupModsList;
+  }
 
   // Called on the render thread to patch pointers (meshPointers) to cluster
   // groups. These may include writing pointers to new groups or zeroing
   // pointers to those just unloaded. May return objects to free after the
   // commands have been completed and the semaphore has been signalled.
   // NOTE: unloadGarbageSemaphore is only valid when unloadGarbage is not empty
-  void modifyGroups(ModifyGroupsProgram&          program,
+  void modifyGroups(const vko::Device&            device,
+                    ModifyGroupsProgram&          program,
                     vkobj::Buffer<shaders::Mesh>& meshPointers,
                     vkobj::SemaphoreValue         promisedSubmitSemaphoreState,
                     VkCommandBuffer               cmd,
-                    uint64_t&                     totalResidentClusters,  // TODO: clean up too many params
-                    uint64_t&                     totalResidentInstanceClusters);
+                    uint64_t& totalResidentClusters,  // TODO: clean up too many params
+                    uint64_t& totalResidentInstanceClusters);
 
-  size_t memoryUsage() const { return m_loads.size_bytes() + m_unloads.size_bytes(); }
+  size_t memoryUsage() const
+  {
+    return m_loads.sizeBytes() + m_unloads.sizeBytes();
+  }
 
 private:
-  vkobj::Buffer<shaders::LoadGroup>    m_loads;
-  vkobj::Buffer<shaders::UnloadGroup>  m_unloads;
+  vko::DeviceBuffer<shaders::LoadGroup>   m_loads;
+  vko::DeviceBuffer<shaders::UnloadGroup> m_unloads;
   std::optional<vkobj::SemaphoreValue> m_reuseSemaphore;  // render queue to streaming thread sync
-  shaders::StreamGroupModsList         m_groupModsList;
-  int32_t                              m_clusterCountDelta         = 0;
-  int32_t                              m_instanceClusterCountDelta = 0;
+  shaders::StreamGroupModsList m_groupModsList;
+  int32_t                      m_clusterCountDelta         = 0;
+  int32_t                      m_instanceClusterCountDelta = 0;
 };
 
 enum Result : uint32_t
@@ -179,7 +293,7 @@ public:
   // the same page, m_topLevelRequests can. It is then possible that a batch
   // is created with both a load and an unload for the same page. This could
   // result in cracks in a mesh.
-  void dequeueLoadUnloadBatch(const Scene&                                     scene,
+  void dequeueLoadUnloadBatch(const Scene& scene,
                               const std::function<Result(uint32_t, uint32_t)>& emitLoad,
                               const std::function<Result(uint32_t, uint32_t)>& emitUnload);
 
@@ -187,17 +301,18 @@ public:
 
 private:
   // Depth first search. Related to topological sort
-  Result loadGroupDependenciesRecursive(offset_span<offset_span<uint32_t>>               meshGroupGeneratedGroups,
-                                        uint32_t                                         meshGroupOffset,
-                                        uint32_t                                         meshIndex,
-                                        uint32_t                                         meshGroupIndex,
+  Result loadGroupDependenciesRecursive(offset_span<offset_span<uint32_t>> meshGroupGeneratedGroups,
+                                        uint32_t meshGroupOffset,
+                                        uint32_t meshIndex,
+                                        uint32_t meshGroupIndex,
                                         const std::function<Result(uint32_t, uint32_t)>& emitLoad);
-  Result unloadGroupDependenciesRecursive(offset_span<offset_span<uint32_t>>               meshGroupGeneratedGroups,
-                                          offset_span<offset_span<uint32_t>>               meshGroupGeneratingGroups,
-                                          uint32_t                                         meshGroupOffset,
-                                          uint32_t                                         meshIndex,
-                                          uint32_t                                         meshGroupIndex,
-                                          const std::function<Result(uint32_t, uint32_t)>& emitUnload);
+  Result unloadGroupDependenciesRecursive(
+      offset_span<offset_span<uint32_t>> meshGroupGeneratedGroups,
+      offset_span<offset_span<uint32_t>> meshGroupGeneratingGroups,
+      uint32_t                           meshGroupOffset,
+      uint32_t                           meshIndex,
+      uint32_t                           meshGroupIndex,
+      const std::function<Result(uint32_t, uint32_t)>& emitUnload);
 
   std::vector<bool> m_globalGroupsExpected;  // Allow new request to shortcut queued requests in m_topLevelRequests
   std::vector<bool> m_globalGroupsNeeded;  // Pin top level requests so that an orphaned dependency doesn't unload them

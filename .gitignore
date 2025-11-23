@@ -2,6 +2,7 @@ bin_x64/
 build*/
 .cache/
 .vscode/
+.clangd
 *.code-workspace
 log_nvprosample.txt
 ucode.bin
@@ -16,3 +17,4 @@ zbsgfxpack.lua
 _install
 downloaded_resources/
 camera_paths.json
+screenshot.png

@@ -18,12 +18,11 @@
 #pragma once
 
 #include <acceleration_structures.hpp>
+#include <lod_streaming_scene.hpp>
 #include <lod_traverser.hpp>
-#include <nvvk/pipeline_vk.hpp>
-#include <nvvk/sbtwrapper_vk.hpp>
+#include <rasterize_device_host.h>
 #include <renderer_common.hpp>
 #include <sample_glsl_compiler.hpp>
-#include <shaders/rasterize_device_host.h>
 
 struct RasterizeConfig
 {
@@ -31,79 +30,84 @@ struct RasterizeConfig
   uint32_t                 maxDrawableClusterBits = 20;
 };
 
-class RasterizeRenderer : public RendererInterface
+class RasterizeRenderer
 {
 public:
-  RasterizeRenderer(ResourceAllocator*    allocator,
-                    SampleGlslCompiler&   glslCompiler,
-                    VkCommandPool         initPool,
-                    uint32_t              initQueueFamilyIndex,
-                    VkQueue               initQueue,
-                    const RendererCommon& common,
-                    const Scene&          scene,
-                    const SceneVK&        sceneVk,
-                    Framebuffer&          framebuffer);
+  static constexpr bool requiresCLAS() { return false; }
 
+  RasterizeRenderer(const RenderInitParams& params);
 
-  virtual void         updatedFrambuffer(const RenderParams& params) override;
-  virtual void render(const RenderParams& params, const SceneVK& sceneVk, VkCommandBuffer cmd) override;
-  virtual void         uiOverlay() override;
-  virtual void         uiInline(bool&, bool&) override {}
-  virtual void         uiSection(bool& recreateRenderer, bool& resetFrameAccumulation) override;
-  virtual VkDeviceSize deviceMemoryUsage() const override { return 0; }
-  virtual bool requiresCLAS() const override { return false; }
+  void         updatedFrambuffer(const RenderParams& params);
+  void         render(const RenderParams& params,
+                      const SceneVK&      sceneVk,
+                      vko::StagingStream<vko::vma::RecyclingStagingPool<vko::Device>>& staging);
+  void         uiOverlay();
+  void         uiInline(bool&, bool&) {}
+  void         uiSection(bool& recreateRenderer, bool& resetFrameAccumulation);
+  VkDeviceSize deviceMemoryUsage() const { return 0; }
+
+  streaming::StreamingSceneVk&       streaming() { return *m_streaming; }
+  const streaming::StreamingSceneVk& streaming() const { return *m_streaming; }
 
 private:
-  static const uint64_t MAX_CYCLES = 4;
+  std::unique_ptr<streaming::StreamingSceneVk> m_streaming;
+  static constexpr uint64_t                    MAX_CYCLES = 4;
 
   RasterizeConfig m_config;
 
   struct Drawing
   {
-    vkobj::Pipeline pipeline;
-
-    nvvk::DescriptorSetContainer bindings;
-
+    std::optional<vko::BindingsAndFlags>        bindings;
+    std::optional<vko::DescriptorSetLayout>     descriptorSetLayout;
+    std::optional<vko::PipelineLayout>          pipelineLayout;
+    std::optional<vko::GraphicsPipeline>        pipeline;
+    std::optional<vko::SingleDescriptorSetPool> descriptorPool;
+    std::optional<vko::DescriptorSet>           descriptorSet;
   } m_drawing;
 
   struct DrawingData
   {
-    vkobj::Buffer<shaders::RasterizeConstants> constants;
+    std::optional<vkobj::Buffer<shaders::RasterizeConstants>> constants;
 
-    vkobj::Buffer<shaders::DrawCluster>           drawClusters;
-    vkobj::Buffer<shaders::DrawMeshTasksIndirect> drawIndirect;
-    vkobj::Buffer<shaders::DrawStats>             drawStats;
-    vkobj::Buffer<shaders::DrawStats>             drawStatsHostVisible;
-    vkobj::BufferMapping<shaders::DrawStats>      drawStatsMapping;
+    std::optional<vkobj::Buffer<shaders::DrawCluster>>           drawClusters;
+    std::optional<vkobj::Buffer<shaders::DrawMeshTasksIndirect>> drawIndirect;
+    std::optional<vkobj::Buffer<shaders::DrawStats>>             drawStats;
+    std::optional<vkobj::Buffer<shaders::DrawStats>> drawStatsHostVisible;
+    std::optional<vkobj::BufferMapping<shaders::DrawStats>> drawStatsMapping;
   } m_drawingData;
 
   struct Traversal
   {
-    vkobj::Pipeline traversePipeline;
-    vkobj::Pipeline traverseInitPipeline;
-    vkobj::Pipeline traverseVerifyPipeline;
-
-    nvvk::DescriptorSetContainer bindings;
+    std::optional<vko::BindingsAndFlags>        bindings;
+    std::optional<vko::DescriptorSetLayout>     descriptorSetLayout;
+    std::optional<vko::PipelineLayout>          pipelineLayout;
+    std::optional<vko::ComputePipeline>         traversePipeline;
+    std::optional<vko::ComputePipeline>         traverseInitPipeline;
+    std::optional<vko::ComputePipeline>         traverseVerifyPipeline;
+    std::optional<vko::SingleDescriptorSetPool> descriptorPool;
+    std::optional<vko::DescriptorSet>           descriptorSet;
   } m_traversal;
 
   struct TraversalData
   {
-    vkobj::Buffer<shaders::TraversalConstants> constants;
-    vkobj::Buffer<shaders::EncodedNodeJob>     nodeQueue;
-    vkobj::Buffer<shaders::EncodedClusterJob>  clusterQueue;
-    vkobj::Buffer<shaders::JobStatus>          jobStatus;
+    std::optional<vkobj::Buffer<shaders::TraversalConstants>> constants;
+    std::optional<vkobj::Buffer<shaders::EncodedNodeJob>>     nodeQueue;
+    std::optional<vkobj::Buffer<shaders::EncodedClusterJob>>  clusterQueue;
+    std::optional<vkobj::Buffer<shaders::JobStatus>>          jobStatus;
   } m_traversalData;
 
   uint64_t m_frame = 0;
 
-  void initDrawingPipeline(VkDevice              device,
+  void initDrawingPipeline(const vko::Device&    device,
                            SampleGlslCompiler&   glslCompiler,
                            const RendererCommon& common,
                            const Scene&          scene,
                            const SceneVK&        sceneVk,
                            Framebuffer&          framebuffer);
 
-  void initTraversalPipeline(VkDevice device, SampleGlslCompiler& glslCompiler, Framebuffer& framebuffer);
+  void initTraversalPipeline(const vko::Device&  device,
+                             SampleGlslCompiler& glslCompiler,
+                             Framebuffer&        framebuffer);
 
   void resizeTraversalData(const RenderParams& params, const SceneVK& sceneVk, VkCommandBuffer cmd);
   void resizeDrawingData(const RenderParams& params);

@@ -2,11 +2,11 @@
 
 > [!NOTE]
 > This demo is now independently maintained by me, the original NVIDIA
-> developer, forked from [here](https://github.com/NVIDIA-RTX/VKLOD-Sample). I
-> hope you enjoy it or find something useful. Feel free to file issues on
-> GitHub. For reference,
-> [vk_lod_clusters](https://github.com/nvpro-samples/vk_lod_clusters) is a
-> similar Vulkan demo still actively maintained by NVIDIA.
+> developer, forked from [here](https://github.com/NVIDIA-RTX/VKLOD-Sample) and
+> ported to [vulkan_objects](https://github.com/pknowles/vulkan_objects). I hope
+> you enjoy it or find something useful. Feel free to file issues on GitHub. For
+> reference, [vk_lod_clusters](https://github.com/nvpro-samples/vk_lod_clusters)
+> is a similar Vulkan demo still actively maintained by NVIDIA.
 
 ![preview](doc/clusters.jpg)
 
@@ -16,8 +16,8 @@ from disk, like [Nanite's virtual
 geometry](https://dev.epicgames.com/documentation/en-us/unreal-engine/nanite-virtualized-geometry-in-unreal-engine)
 but for ray tracing. It is
 [RAII](https://www.heuristic42.com/blog/66/raii-the-powerful-implication-of-always-initializing/)
-leaning and intends to demonstrate Vulkan API usage and object design ideas.
-[**Download and run the latest
+leaning and intends to demonstrate Vulkan API usage and object design ideas as
+well as LOD. [**Download and run the latest
 release**](https://github.com/pknowles/VKLOD-Sample/releases/latest) or
 [build](#building-and-dependencies) from source. You'll need an NVIDIA RTX GPU
 and somewhat recent [drivers](https://www.nvidia.com/drivers/).
@@ -249,25 +249,52 @@ Some key parts to focus on:
 Much of the `src/sample_*` code is boilerplate vulkan and can be ignored. As is
 setup and rendering in `main.cpp` and `renderer_*`.
 
-This demo leans towards RAII and layered utilities. For readers who prefer more
-direct inline Vulkan API calls, you might find some equivalent functionality in
-[vk_lod_clusters](https://github.com/nvpro-samples/vk_lod_clusters) more to your
-liking.
-
 The path tracing and shading code is illustrative only and not intended as a
 reference implementation.
 
+## Vulkan and RAII
+
+This demo uses the [vulkan_objects](https://github.com/pknowles/vulkan_objects)
+library, a lightweight
+[RAII](https://www.heuristic42.com/blog/66/raii-the-powerful-implication-of-always-initializing/)
+vulkan provider and wrapper. At its core is a template handle class that
+guarantees vulkan objects are always initialized and valid. It takes a bit more
+time to design around this constraint, but it can lead to better designs as it's
+harder to tangle object dependencies and lifetimes. This alone can be used, but
+there are many more utilities with a similar safety philosophy that may be of
+interest. Check out the [quick ref](https://github.com/pknowles/vulkan_objects#quick-reference).
+
+For readers who prefer more direct inline Vulkan API calls, you might find some
+equivalent LOD rendering in
+[vk_lod_clusters](https://github.com/nvpro-samples/vk_lod_clusters) more to your
+liking.
+
 ## Building and Dependencies
+
+None, in some sense.
 
 An NVIDIA RTX GPU is required to run the demo. The Vulkan implementation
 (driver) must support
 [`VK_NV_cluster_acceleration_structure`](https://registry.khronos.org/vulkan/specs/latest/man/html/VK_NV_cluster_acceleration_structure.html).
 
-This demo uses [CMake](https://cmake.org/download/) and requires the [Vulkan
-SDK](https://vulkan.lunarg.com/). It is tested on Windows (with [Visual
-Studio](https://visualstudio.microsoft.com/vs/) 2022) and Linux (gcc 14). It
-uses git submodules and fetch_content for other dependencies. After cloning,
-run:
+A standard C++ development environment:
+
+- [CMake](https://cmake.org/download/)
+- C++23: `gcc`, `clang` or [visual studio](https://visualstudio.microsoft.com/downloads/)
+
+Dependencies included:
+
+- The `vulkan_objects` submodule
+- Source code downloaded via CMake's FetchContent
+- NVIDIA DLSS pre-built binaries are downloaded from https://github.com/NVIDIA/DLSS by CMake
+
+The LunarG Vulkan SDK is NOT required.
+[vulkan_objects](https://github.com/pknowles/vulkan_objects) has its own loader
+and uses function tables rather than loading into global function pointers.
+While they are compatible, the application can be built entirely from source
+without and in turn does not have to target a specific Vulkan SDK version.
+
+It is tested with g++ 15.2 and Visual Studio 2022:
 
 ```bash
 git submodule update --init --recursive
@@ -277,7 +304,6 @@ cmake -S . -B build
 cmake --build build --config Release --parallel
 
 # Linux
-source path/to/vulkan-sdk/setup-env.sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel
 ```
@@ -306,6 +332,8 @@ This demo is licensed under the [Apache License
 
 This demo uses third-party dependencies, which have their own:
 
+- [vulkan_objects](https://github.com/pknowles/vulkan_objects), licensed under the
+  [MIT License](https://github.com/pknowles/vulkan_objects/blob/main/LICENSE)
 - [nv_cluster_lod_builder](https://github.com/pknowles/nv_cluster_lod_builder),
 licensed under the [Apache License
 2.0](https://github.com/pknowles/nv_cluster_lod_builder/blob/main/LICENSE)
@@ -316,10 +344,28 @@ under the [Apache License
   [MIT License](https://github.com/zeux/meshoptimizer/blob/47aafa533b439a78b53cd2854c177db61be7e666/LICENSE.md)
 - [decodeless collection](https://github.com/decodeless), licensed under the
   [MIT License](https://github.com/decodeless/writer/blob/main/LICENSE)
-- [nvpro_core](https://github.com/nvpro-samples/nvpro_core), licensed under the
-  [Apache License
-  2.0](https://github.com/nvpro-samples/nvpro_core/blob/master/LICENSE)
-- [Vulkan SDK](https://www.lunarg.com/vulkan-sdk/), see https://vulkan.lunarg.com/license/ for the version you installed
+- `./nvpro_core_legacy` fragments from [nvpro_core](https://github.com/nvpro-samples/nvpro_core), licensed under the
+  [Apache License 2.0](https://github.com/nvpro-samples/nvpro_core/blob/master/LICENSE)
+  - Code fragments: dxh (Microsoft, MIT), nvtx (Nvidia, Apache 2.0)
+  - [nlohmann/json](https://github.com/nlohmann/json/blob/develop/LICENSE.MIT), MIT
+  - [Open Iconic font](https://github.com/iconic/open-iconic), MIT
+  - [Roboto font](https://fonts.google.com/specimen/Roboto/license)
+- [GLFW](https://github.com/glfw/glfw), licensed under 
+  [zlib License](https://github.com/glfw/glfw/blob/master/LICENSE.md)
+- [Dear ImGui](https://github.com/ocornut/imgui), licensed under
+  [MIT License](https://github.com/ocornut/imgui/blob/master/LICENSE.txt)
+- [ImPlot](https://github.com/epezent/implot), licensed under
+  [MIT License](https://github.com/epezent/implot/blob/master/LICENSE)
+- [ImGuiFileDialog](https://github.com/aiekick/ImGuiFileDialog), licensed under
+  [MIT License](https://github.com/aiekick/ImGuiFileDialog/blob/master/LICENSE)
+- [Taywee/args](https://github.com/Taywee/args), licensed under
+  [MIT License](https://github.com/Taywee/args/blob/master/LICENSE)
+- [cgltf](https://github.com/jkuhlmann/cgltf.git), licensed under
+  [MIT License](https://github.com/jkuhlmann/cgltf/blob/master/LICENSE)
+- [stb_image](https://github.com/nothings/stb), licensed under
+  [MIT License / Public Domain](https://github.com/nothings/stb/blob/master/LICENSE)
+- [glm](https://github.com/g-truc/glm), licensed under
+  [MIT License](https://github.com/g-truc/glm/blob/master/copying.txt)
 
 ## References
 

@@ -20,7 +20,7 @@
 #ifndef _NVHIZ_H__
 #define _NVHIZ_H__
 
-#include <platform.h>
+#include <shaderc/shaderc.hpp>
 #include <stdint.h>
 #include <string>
 #include <vector>
@@ -48,7 +48,8 @@ private:
 
 public:
   static const uint32_t MAX_MIP_LEVELS = 16;
-  static const uint32_t SHADER_COUNT   = (uint32_t(PROG_HIZ_COUNT) * uint32_t(PROG_VIEW_COUNT));
+  static const uint32_t SHADER_COUNT =
+      (uint32_t(PROG_HIZ_COUNT) * uint32_t(PROG_VIEW_COUNT));
 
   enum BindingSlots
   {
@@ -83,7 +84,7 @@ public:
   struct Update
   {
     // provide texture/views that are not layered
-    VkImageView sourceImageView;                // 2DMS if createInfo.msaaLevel set, otherwise 2D
+    VkImageView sourceImageView;  // 2DMS if createInfo.msaaLevel set, otherwise 2D
     VkImageView nearImageView;                  // 2D optional
     VkImageView farImageView;                   // 2D all mips
     VkImageView farImageViews[MAX_MIP_LEVELS];  // 2D single mip
@@ -118,19 +119,25 @@ public:
   };
 
 
-  void init(VkDevice device, const Config& config, uint32_t descrSetsCount);
+  void init(const vko::Device& device, const Config& config, uint32_t descrSetsCount);
 
   VkSampler                   getReadFarSampler() const;
   const VkDescriptorPoolSize* getDescriptorPoolSizes(uint32_t& count) const;
   VkDescriptorSetLayout       getDescriptorSetLayout() const;
   std::string                 getShaderDefines(uint32_t shader) const;
-  void                        appendShaderDefines(uint32_t shader, shaderc::CompileOptions& options) const;
-  void                        initPipelines(const VkShaderModule modules[SHADER_COUNT]);
+  void appendShaderDefines(uint32_t shader, shaderc::CompileOptions& options) const;
+  void initPipelines(const VkShaderModule modules[SHADER_COUNT]);
 
   void deinit();
 
-  void setupUpdateInfos(Update& update, uint32_t width, uint32_t height, VkFormat sourceFormat, VkImageAspectFlags sourceAspect) const;
-  void setupDescriptorUpdate(DescriptorUpdate& updateWrite, const Update& update, VkDescriptorSet set) const;
+  void setupUpdateInfos(Update&            update,
+                        uint32_t           width,
+                        uint32_t           height,
+                        VkFormat           sourceFormat,
+                        VkImageAspectFlags sourceAspect) const;
+  void setupDescriptorUpdate(DescriptorUpdate& updateWrite,
+                             const Update&     update,
+                             VkDescriptorSet   set) const;
 
   void cmdUpdateHiz(VkCommandBuffer cmd, const Update& update, VkDescriptorSet set) const;
 
@@ -160,7 +167,10 @@ private:
     view = ProgViewMode(index / uint32_t(PROG_HIZ_COUNT));
   }
 
-  static uint32_t getShaderIndex(ProgHizMode hiz, ProgViewMode view) { return view * uint32_t(PROG_HIZ_COUNT) + hiz; }
+  static uint32_t getShaderIndex(ProgHizMode hiz, ProgViewMode view)
+  {
+    return view * uint32_t(PROG_HIZ_COUNT) + hiz;
+  }
 
   struct PushConstants
   {
@@ -176,7 +186,7 @@ private:
   void deinitPipelines();
 
   InternalConfig        m_config                  = {};
-  VkDevice              m_device                  = {};
+  const vko::Device*    m_device                  = {};
   VkSampler             m_readDepthSampler        = {};
   VkSampler             m_readFarSampler          = {};
   VkSampler             m_readNearSampler         = {};

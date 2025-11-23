@@ -25,7 +25,7 @@
 #include <sample_glsl_compiler.hpp>
 #include <sample_progress.hpp>
 #include <sample_vulkan_objects.hpp>
-#include <shaders/shaders_mesh_gen.h>
+#include <shaders_mesh_gen.h>
 #include <vector>
 
 struct SimpleMesh
@@ -35,14 +35,14 @@ struct SimpleMesh
   std::vector<glm::vec3>  normals;
 };
 
-SimpleMesh generateMesh(ResourceAllocator*                                       allocator,
+SimpleMesh generateMesh(const vko::Device&   device,
+                        vko::vma::Allocator& allocator,
+                        vkobj::Staging&      staging,
                         vkobj::SimpleComputePipeline<shaders::MeshGenConstants>& pipeline,
-                        VkCommandPool                                            pool,
-                        vkobj::TimelineQueue&                                    queue,
-                        uint32_t                                                 seed,
-                        uint32_t                                                 maxTriangles);
+                        uint32_t seed,
+                        uint32_t maxTriangles);
 
-inline shaderc::CompileOptions withDefines(shaderc::CompileOptions                                    options,
+inline shaderc::CompileOptions withDefines(shaderc::CompileOptions options,
                                            std::initializer_list<std::pair<std::string, std::string>> macros)
 {
   for(const auto& [name, value] : macros)
@@ -52,13 +52,31 @@ inline shaderc::CompileOptions withDefines(shaderc::CompileOptions              
 
 struct GeneratorPipelines
 {
-  GeneratorPipelines(VkDevice device, SampleGlslCompiler& glslCompiler)
-      : terrain(device, glslCompiler, "generate_mesh.comp.glsl", withDefines(glslCompiler.defaultOptions(), {{"TERRAIN", "1"}}))
-      , mountain(device, glslCompiler, "generate_mesh.comp.glsl", withDefines(glslCompiler.defaultOptions(), {{"MOUNTAIN", "1"}}))
-      , rock1(device, glslCompiler, "generate_mesh.comp.glsl", withDefines(glslCompiler.defaultOptions(), {{"ROCK1", "1"}}))
-      , rock2(device, glslCompiler, "generate_mesh.comp.glsl", withDefines(glslCompiler.defaultOptions(), {{"ROCK2", "1"}}))
-      , rock3(device, glslCompiler, "generate_mesh.comp.glsl", withDefines(glslCompiler.defaultOptions(), {{"ROCK3", "1"}}))
-      , rock4(device, glslCompiler, "generate_mesh.comp.glsl", withDefines(glslCompiler.defaultOptions(), {{"ROCK4", "1"}}))
+  GeneratorPipelines(const vko::Device& device, SampleGlslCompiler& glslCompiler)
+      : terrain(device,
+                glslCompiler,
+                "generate_mesh.comp.glsl",
+                withDefines(glslCompiler.defaultOptions(), {{"TERRAIN", "1"}}))
+      , mountain(device,
+                 glslCompiler,
+                 "generate_mesh.comp.glsl",
+                 withDefines(glslCompiler.defaultOptions(), {{"MOUNTAIN", "1"}}))
+      , rock1(device,
+              glslCompiler,
+              "generate_mesh.comp.glsl",
+              withDefines(glslCompiler.defaultOptions(), {{"ROCK1", "1"}}))
+      , rock2(device,
+              glslCompiler,
+              "generate_mesh.comp.glsl",
+              withDefines(glslCompiler.defaultOptions(), {{"ROCK2", "1"}}))
+      , rock3(device,
+              glslCompiler,
+              "generate_mesh.comp.glsl",
+              withDefines(glslCompiler.defaultOptions(), {{"ROCK3", "1"}}))
+      , rock4(device,
+              glslCompiler,
+              "generate_mesh.comp.glsl",
+              withDefines(glslCompiler.defaultOptions(), {{"ROCK4", "1"}}))
   {
   }
   vkobj::SimpleComputePipeline<shaders::MeshGenConstants> terrain;
@@ -75,10 +93,9 @@ struct GeneratedScene
   std::vector<std::pair<uint32_t, glm::mat4>> instances;
 };
 
-GeneratedScene makeTerrainAndRocksScene(VkDevice              device,
-                                        SampleGlslCompiler&   glslCompiler,
-                                        ResourceAllocator*    allocator,
-                                        VkCommandPool         pool,
-                                        vkobj::TimelineQueue& queue,
-                                        float                 detailScale,
-                                        TaskProgress&         progress);
+GeneratedScene makeTerrainAndRocksScene(const vko::Device&   device,
+                                        SampleGlslCompiler&  glslCompiler,
+                                        vko::vma::Allocator& allocator,
+                                        vkobj::Staging&      staging,
+                                        float                detailScale,
+                                        TaskProgress&        progress);

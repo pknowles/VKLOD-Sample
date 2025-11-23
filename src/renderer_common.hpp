@@ -19,38 +19,42 @@
 
 #include <acceleration_structures.hpp>
 #include <bit>
+#include <camera.hpp>
 #include <glm/gtc/matrix_transform.hpp>
-#include <imgui/imgui_helper.h>
 #include <iomanip>
 #include <lod_streaming_jobs.hpp>
 #include <lod_traverser.hpp>
 #include <memory>
-#include <nvh/cameramanipulator.hpp>
 #include <nvhiz_vk.hpp>
-#include <nvvk/profiler_vk.hpp>
 #include <nvvkhl/shaders/dh_sky.h>
 #include <queue>
 #include <sample_garbage.hpp>
+#include <sample_profiler.hpp>
 #include <sample_vulkan_objects.hpp>
 #include <scene.hpp>
-#include <shaders/shaders_frame_params.h>
+#include <shaders_frame_params.h>
 #include <sstream>
+#include <vko/imgui_objects.hpp>
+#include <vko/object.hpp>
+#include <vko/shortcuts.hpp>
 #include <vulkan/vulkan_core.h>
 
 inline std::string formatBytes(uint64_t bytes)
 {
-  constexpr const char* suffixes[]{"B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"};
-  uint64_t              suffix  = std::bit_width(bytes) / 10llu;
-  float                 decimal = suffix > 0 ? float(bytes >> (suffix * 10 - 10)) / 1024.0f : float(bytes);
-  std::ostringstream    oss;  // TODO: replace with std::format() and make constexpr
-  oss << std::setprecision(suffix > 0 ? 1 : 0) << std::fixed << decimal << suffixes[suffix];
+  constexpr const char* suffixes[]{"B",   "KiB", "MiB", "GiB",
+                                   "TiB", "PiB", "EiB"};
+  uint64_t              suffix = uint64_t(std::bit_width(bytes) / 10);
+  float decimal = suffix > 0 ? float(bytes >> (suffix * 10 - 10)) / 1024.0f : float(bytes);
+  std::ostringstream oss;  // TODO: replace with std::format() and make constexpr
+  oss << std::setprecision(suffix > 0 ? 1 : 0) << std::fixed << decimal
+      << suffixes[suffix];
   return oss.str();
 }
 
 class HiZ : public NVHizVK
 {
 public:
-  HiZ(VkDevice device, SampleGlslCompiler& glslCompiler)
+  HiZ(const vko::Device& device, SampleGlslCompiler& glslCompiler)
   {
     NVHizVK::Config config;
     config.msaaSamples             = 0;
@@ -66,12 +70,13 @@ public:
       shaderc::CompileOptions options = glslCompiler.defaultOptions();
       appendShaderDefines(i, options);
 
-      m_hizShaders[i] = reloadUntilCompiling(device, glslCompiler, "nvhiz-update.comp.glsl",
-                                             shaderc_shader_kind::shaderc_compute_shader, &options);
+      m_hizShaders[i] =
+          reloadUntilCompiling(device, glslCompiler, "nvhiz-update.comp.glsl",
+                               shaderc_shader_kind::shaderc_compute_shader, &options);
 
-      assert(m_hizShaders[i]);
+      assert(m_hizShaders[i].has_value());
 
-      shaderModules[i] = m_hizShaders[i];
+      shaderModules[i] = m_hizShaders[i].value();
     }
 
     initPipelines(shaderModules);
@@ -80,7 +85,7 @@ public:
   ~HiZ() { deinit(); }
 
 private:
-  vkobj::ShaderModule m_hizShaders[NVHizVK::SHADER_COUNT];
+  std::array<std::optional<vkobj::ShaderModule>, NVHizVK::SHADER_COUNT> m_hizShaders;
 };
 
 namespace nvvkhl {
@@ -90,7 +95,7 @@ struct TonemapperPostProcess;
 class TonemapPipeline
 {
 public:
-  TonemapPipeline(VkDevice device, nvvk::ResourceAllocator* allocator);
+  TonemapPipeline(const vko::Device& device, SampleGlslCompiler& glslCompiler);
   ~TonemapPipeline();
   nvvkhl::TonemapperPostProcess* operator->() { return m_tonemapper.get(); }
   nvvkhl::TonemapperPostProcess& operator*() { return *m_tonemapper; }
@@ -107,46 +112,73 @@ private:
 class Framebuffer
 {
 public:
-  static const VkFormat c_colorFormat    = VK_FORMAT_R16G16B16A16_SFLOAT;
-  static const VkFormat c_colorLDRFormat = VK_FORMAT_R8G8B8A8_SRGB;  // TODO: can imgui + nvpro_core do sRGB here??
+  static const VkFormat c_colorFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
+  static const VkFormat c_colorLDRFormat = VK_FORMAT_R8G8B8A8_UNORM;  // Can't use SRGB with STORAGE_BIT
   static const VkFormat s_depthFormat = VK_FORMAT_X8_D24_UNORM_PACK32;
 
-  Framebuffer(ResourceAllocator* allocator, SampleGlslCompiler& glslCompiler, TonemapPipeline& persistantTonemap, glm::uvec2 vpSize);
+  Framebuffer(const vko::Device&   device,
+              vko::vma::Allocator& allocator,
+              VkCommandPool        commandPool,
+              VkQueue              queue,
+              SampleGlslCompiler&  glslCompiler,
+              glm::uvec2           vpSize);
 
   ~Framebuffer();
 
   void cmdTonemap(VkCommandBuffer cmd);
-  void tonemapUI();
+  void renderUI();
 
-  VkExtent2D             size() const { return m_gBuffer.getSize(); }
-  VkImage                renderHdrImage() const { return m_gBuffer.getColorImage(0); }
-  VkImageView            renderHdrView() const { return m_gBuffer.getColorImageView(0); }
-  VkDescriptorImageInfo  renderHdrImageInfo() const { return m_gBuffer.getDescriptorImageInfo(0); }
-  VkDescriptorSet        renderHdrDescriptorSet() const { return m_gBuffer.getDescriptorSet(0); }  // for rendering
-  VkImage                displayLdrImage() const { return m_gBuffer.getColorImage(1); }
-  VkImageView            displayLdrView() const { return m_gBuffer.getColorImageView(1); }
-  VkDescriptorImageInfo  displayLdrImageInfo() const { return m_gBuffer.getDescriptorImageInfo(1); }
-  VkDescriptorSet        displayLdrDescriptorSet() const { return m_gBuffer.getDescriptorSet(1); }  // to display
-  const nvvkhl::GBuffer& gbuffer() const { return m_gBuffer; }
+  VkExtent2D size() const { return {m_size.x, m_size.y}; }
+
+  // HDR render target accessors
+  VkImage               renderHdrImage() const { return m_colorHDR.image; }
+  VkImageView           renderHdrView() const { return m_colorHDR.view; }
+  VkDescriptorImageInfo renderHdrImageInfo() const
+  {
+    return {m_sampler, m_colorHDR.view, VK_IMAGE_LAYOUT_GENERAL};
+  }
+
+  // LDR display target accessors
+  VkImage               displayLdrImage() const { return m_colorLDR.image; }
+  VkImageView           displayLdrView() const { return m_colorLDR.view; }
+  VkDescriptorImageInfo displayLdrImageInfo() const
+  {
+    return {m_sampler, m_colorLDR.view, VK_IMAGE_LAYOUT_GENERAL};
+  }
+  ImTextureID displayImGuiTexture() const { return m_imguiTexture; }
+
+  // Depth accessors
+  VkImage     depthImage() const { return m_depth.image; }
+  VkImageView depthView() const { return m_depth.view; }
 
   HiZ&                         hiz() { return m_hiz; }
   const NVHizVK::Update&       hizUpdate() const { return m_hizUpdate; }
-  const VkDescriptorImageInfo& hizFar() const { return m_hizUpdate.farImageInfo; }
-  glm::vec4                    hizFarFactors() const;
-  float                        hizFarMax() const;
+  const VkDescriptorImageInfo& hizFar() const
+  {
+    return m_hizUpdate.farImageInfo;
+  }
+  glm::vec4 hizFarFactors() const;
+  float     hizFarMax() const;
 
   // None of this is copy/move safe
-  Framebuffer(const Framebuffer& other) = delete;
+  Framebuffer(const Framebuffer& other)           = delete;
   Framebuffer operator=(const Framebuffer& other) = delete;
 
 private:
-  nvvkhl::GBuffer    m_gBuffer;
-  ResourceAllocator* m_allocator = nullptr;
-  HiZ                m_hiz;
-  nvvk::Image        m_imgHizFar = {};
-  NVHizVK::Update    m_hizUpdate;
-  TonemapPipeline& m_tonemap;  // tonemapper is owned externally so its config/UI persists between resizes (TODO: move outside)
-  void initHiz(glm::uvec2 vpSize);
+  glm::uvec2                        m_size;
+  vko::ViewedImage<>                m_colorHDR;  // HDR render target
+  vko::ViewedImage<>                m_colorLDR;  // LDR display target
+  vko::ViewedImage<>                m_depth;     // Depth buffer
+  vko::Sampler                      m_sampler;
+  vko::imgui::Texture               m_imguiTexture;
+  vko::vma::Allocator*              m_allocator   = nullptr;
+  VkCommandPool                     m_commandPool = VK_NULL_HANDLE;
+  VkQueue                           m_queue       = VK_NULL_HANDLE;
+  HiZ                               m_hiz;
+  std::optional<vko::ViewedImage<>> m_hizFar;
+  NVHizVK::Update                   m_hizUpdate;
+  TonemapPipeline                   m_tonemap;
+  void initHiz(const vko::Device& device, glm::uvec2 vpSize);
 };
 
 struct RendererConfig
@@ -158,13 +190,19 @@ struct RendererConfig
 
 struct RendererCommon
 {
-  RendererCommon(ResourceAllocator* allocator, SampleGlslCompiler& glslCompiler, VkCommandPool initPool, VkQueue initQueue, const SceneVK& sceneVk);
+  RendererCommon(const vko::Device&              device,
+                 vko::vma::Allocator&            allocator,
+                 vko::shared_obj<RendererConfig> config);
 
-  void cmdUpdateParams(Framebuffer& framebuffer, nvh::CameraManipulator& camera, float maxWorldDiagonalInObjectSpace, VkCommandBuffer cmd);
+  void cmdUpdateParams(const vko::Device& device,
+                       Framebuffer&       framebuffer,
+                       Camera&            camera,
+                       float              maxWorldDiagonalInObjectSpace,
+                       VkCommandBuffer    cmd);
   bool uiLod(const Scene& scene, const Framebuffer& framebuffer);
   bool uiSky();
 
-  RendererConfig                                     m_config;
+  vko::shared_obj<RendererConfig>                    m_config;
   shaders::TraversalParams                           m_traversalParams;
   nvvkhl_shaders::SimpleSkyParameters                m_skyParams = {};
   vkobj::Buffer<shaders::FrameParams>                m_bFrameInfo;
@@ -177,17 +215,33 @@ struct RendererCommon
   uint64_t m_frameIndex = 0;
 };
 
-// A non-owning parameter pack for creating or updating the renderer
+// A non-owning parameter pack for creating the renderer and its streaming
 struct RenderInitParams
 {
-  VkInstance          instance;
   vkobj::Context&     context;
   SampleGlslCompiler& glslCompiler;
-  RendererCommon&     common;
-  const Scene&        scene;
-  const SceneVK&      sceneVk;
-  Framebuffer&        framebuffer;
+
+  // Renderer resources
+  RendererCommon& common;
+  const Scene&    scene;
+  SceneVK&        sceneVk;  // non-const: streaming writes to it
+  Framebuffer&    framebuffer;
+  bool            dlssAvailable = false;
+
+  // Streaming resources
+  VkQueue               queue;
+  VkCommandPool         initPool;
+  vkobj::TimelineQueue& initQueue;
+  vkobj::TimelineQueue& transferQueue;
+  VkDeviceSize          streamingBufferSize;
+  uint32_t              streamingMaxResidentGroups;
+  bool                  streamingGreedyUnload;
+  SampleProfiler&       profiler;
 };
+
+
+// Forward declare SampleVulkanContext
+struct SampleVulkanContext;
 
 // Trivial container for three commonly used queues
 struct TimelineQueueContainer
@@ -195,36 +249,30 @@ struct TimelineQueueContainer
   vkobj::TimelineQueue primary;
   vkobj::TimelineQueue compute;
   vkobj::TimelineQueue transfer;
+  vkobj::TimelineQueue asyncLoad;
 
-  TimelineQueueContainer(nvvkhl::Application* app)
-      : primary(app->getDevice(), app->getQueue(0).familyIndex, app->getQueue(0).queue)
-      , compute(app->getDevice(), app->getQueue(1).familyIndex, app->getQueue(1).queue)
-      , transfer(app->getDevice(), app->getQueue(2).familyIndex, app->getQueue(2).queue)
-  {
-  }
+  TimelineQueueContainer(const SampleVulkanContext& vkContext);
 };
 
 // A non-owning parameter pack for rendering
 struct RenderParams
 {
-  VkInstance              instance;
   vkobj::Context&         context;
   RendererCommon&         common;
+  Camera&                 camera;
   Framebuffer&            framebuffer;
-  nvvk::ProfilerVK&       profiler;
+  SampleProfiler&         profiler;
   std::queue<Garbage>&    garbage;
   TimelineQueueContainer& queueStates;
 };
 
-class RendererInterface
-{
-public:
-  virtual ~RendererInterface()                                                                         = default;
-  virtual void         updatedFrambuffer(const RenderParams& params)                                   = 0;
-  virtual void         render(const RenderParams& params, const SceneVK& sceneVk, VkCommandBuffer cmd) = 0;
-  virtual void         uiOverlay()                                                                     = 0;
-  virtual void         uiInline(bool& recreateRenderer, bool& resetFrameAccumulation)                  = 0;
-  virtual void         uiSection(bool& recreateRenderer, bool& resetFrameAccumulation)                 = 0;
-  virtual VkDeviceSize deviceMemoryUsage() const                                                       = 0;
-  virtual bool         requiresCLAS() const                                                            = 0;
-};
+// Note: RendererInterface removed - use std::variant<RaytraceRenderer, RasterizeRenderer> instead
+// Each renderer must provide these methods:
+//   void         updatedFrambuffer(const RenderParams& params);
+//   void         render(const RenderParams& params, const SceneVK& sceneVk, StagingStream& staging);
+//   void         uiOverlay();
+//   void         uiInline(bool& recreateRenderer, bool& resetFrameAccumulation);
+//   void         uiSection(bool& recreateRenderer, bool& resetFrameAccumulation);
+//   VkDeviceSize deviceMemoryUsage() const;
+//   static constexpr bool requiresCLAS();
+//   streaming::StreamingSceneVk& streaming();

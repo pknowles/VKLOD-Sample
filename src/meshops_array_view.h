@@ -78,7 +78,8 @@ public:
   using reference         = value_type&;
   using difference_type   = ptrdiff_t;
   using stride_type       = ptrdiff_t;
-  using byte_pointer      = std::conditional_t<std::is_const_v<value_type>, const uint8_t*, uint8_t*>;
+  using byte_pointer =
+      std::conditional_t<std::is_const_v<value_type>, const uint8_t*, uint8_t*>;
 
 #if ARRAY_VIEW_ITERATOR_OVERFLOW_DETECTION
   using size_type = uint64_t;
@@ -99,12 +100,30 @@ public:
   StrideIterator()                            = default;
   StrideIterator(const StrideIterator& other) = default;
 
-  bool operator==(const StrideIterator& other) const { return (m_ptr == other.m_ptr); }
-  bool operator!=(const StrideIterator& other) const { return (m_ptr != other.m_ptr); }
-  bool operator<(const StrideIterator& other) const { return (m_ptr < other.m_ptr); }
-  bool operator<=(const StrideIterator& other) const { return (m_ptr <= other.m_ptr); }
-  bool operator>(const StrideIterator& other) const { return (m_ptr > other.m_ptr); }
-  bool operator>=(const StrideIterator& other) const { return (m_ptr >= other.m_ptr); }
+  bool operator==(const StrideIterator& other) const
+  {
+    return (m_ptr == other.m_ptr);
+  }
+  bool operator!=(const StrideIterator& other) const
+  {
+    return (m_ptr != other.m_ptr);
+  }
+  bool operator<(const StrideIterator& other) const
+  {
+    return (m_ptr < other.m_ptr);
+  }
+  bool operator<=(const StrideIterator& other) const
+  {
+    return (m_ptr <= other.m_ptr);
+  }
+  bool operator>(const StrideIterator& other) const
+  {
+    return (m_ptr > other.m_ptr);
+  }
+  bool operator>=(const StrideIterator& other) const
+  {
+    return (m_ptr >= other.m_ptr);
+  }
 
   StrideIterator& operator+=(const difference_type& i)
   {
@@ -183,7 +202,10 @@ private:
     uintptr_t byte = reinterpret_cast<uintptr_t>(ptr) + byteOffset;
     return reinterpret_cast<pointer>(byte);
   }
-  pointer offsetStrides(const difference_type& i) { return offsetBytes(m_ptr, m_stride * i); }
+  pointer offsetStrides(const difference_type& i)
+  {
+    return offsetBytes(m_ptr, m_stride * i);
+  }
 
 #if ARRAY_VIEW_ITERATOR_OVERFLOW_DETECTION
   pointer m_begin{nullptr};
@@ -276,8 +298,11 @@ public:
                 !(!std::is_const_v<value_type> && std::is_const_v<T>)>>
   explicit ArrayView(const ArrayView<T>& other)
       : m_ptr(reinterpret_cast<value_type*>(other.data()))  // const to non-const is a common error here. make sure you have ArrayView<const ...>
-      , m_size((other.size() * static_cast<size_type>(sizeof(T))) / static_cast<size_type>(sizeof(value_type)))
-      , m_stride(sizeof(T) == sizeof(value_type) ? other.stride() : static_cast<size_type>(sizeof(value_type)))
+      , m_size((other.size() * static_cast<size_type>(sizeof(T)))
+               / static_cast<size_type>(sizeof(value_type)))
+      , m_stride(sizeof(T) == sizeof(value_type) ?
+                     other.stride() :
+                     static_cast<size_type>(sizeof(value_type)))
   {
     // Sanity check that both views now refer to the same amount of data
     ARRAY_VIEW_BOUNDS_CHECK(size() * static_cast<size_type>(sizeof(value_type))
@@ -285,7 +310,8 @@ public:
     ARRAY_VIEW_BOUNDS_CHECK(size() * stride() == other.size() * other.stride());
 
     // Either the array was tightly packed or the element size must be the same, to keep the same stride
-    ARRAY_VIEW_BOUNDS_CHECK(sizeof(value_type) == sizeof(T) || other.stride() == static_cast<size_type>(sizeof(T)));
+    ARRAY_VIEW_BOUNDS_CHECK(sizeof(value_type) == sizeof(T)
+                            || other.stride() == static_cast<size_type>(sizeof(T)));
   }
 
   value_type& operator[](size_type idx) const { return *(begin() + idx); }
@@ -326,7 +352,8 @@ protected:
 template <class VectorValueType>
 ArrayView(std::vector<VectorValueType>& vector) -> ArrayView<VectorValueType>;
 template <class VectorValueType>
-ArrayView(const std::vector<VectorValueType>& vector) -> ArrayView<const VectorValueType>;
+ArrayView(const std::vector<VectorValueType>& vector)
+    -> ArrayView<const VectorValueType>;
 
 // Utility type to force the value type to be const or non-const
 template <class ValueType>
@@ -367,7 +394,10 @@ public:
 
   DynamicArrayView()                              = default;
   DynamicArrayView(const DynamicArrayView& other) = default;
-  DynamicArrayView(std::function<resize_func_type> resizeCallback, value_type* ptr, size_type size, stride_type stride = sizeof(value_type))
+  DynamicArrayView(std::function<resize_func_type> resizeCallback,
+                   value_type*                     ptr,
+                   size_type                       size,
+                   stride_type                     stride = sizeof(value_type))
       : ArrayView<ValueType>(ptr, size, stride)
       , m_resizeCallback(resizeCallback)
   {
@@ -394,8 +424,8 @@ public:
       , m_resizeCallback([this, cb = other.m_resizeCallback](size_type size, const ValueType& value) {
         size_t otherTypeSize = static_cast<size_type>(sizeof(T));
         size_t thisTypeSize  = static_cast<size_type>(sizeof(value_type));
-        this->m_ptr =
-            reinterpret_cast<value_type*>(cb((size * thisTypeSize) / otherTypeSize, reinterpret_cast<const T&>(value)));
+        this->m_ptr          = reinterpret_cast<value_type*>(
+            cb((size * thisTypeSize) / otherTypeSize, reinterpret_cast<const T&>(value)));
         this->m_size = size;
         return this->m_ptr;
       })

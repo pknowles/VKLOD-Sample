@@ -21,21 +21,24 @@
 #include <atomic>
 #include <cassert>
 #include <chrono>
-#include <fmt/chrono.h>
 #include <glm/detail/qualifier.hpp>
 #include <glm/glm.hpp>
 #include <mutex>
 #include <numeric>
+#include <print>
 #include <stdexcept>
 #include <vector>
 
 // A tiny over-engineered solver to improve progress bar accuracy
 // Disclaimer: AI written
 template <class T, glm::length_t N, class Func>
-std::pair<T, glm::vec<N, T>> fitNonlinear(std::span<const T> Xs, std::span<const T> Yx, const glm::vec<N, T>& initialGuess, Func&& func)
+std::pair<T, glm::vec<N, T>> fitNonlinear(std::span<const T>    Xs,
+                                          std::span<const T>    Yx,
+                                          const glm::vec<N, T>& initialGuess,
+                                          Func&&                func)
 {
   using Variables = glm::vec<N, T>;
-  using MatN      = std::array<Variables, N>;  // sadly glm is not generic enough to allow glm::mat<N, N, T>
+  using MatN = std::array<Variables, N>;  // sadly glm is not generic enough to allow glm::mat<N, N, T>
   assert(Xs.size() == Yx.size());
   assert(Xs.size() >= N);  // Need at least N data points for N parameters
 
@@ -52,7 +55,7 @@ std::pair<T, glm::vec<N, T>> fitNonlinear(std::span<const T> Xs, std::span<const
   xScale = std::max(xScale, T(1));  // Avoid zero scale
 
   // Adaptive parameters based on data scale and fp32 precision
-  const T sqrtEps    = std::sqrt(std::numeric_limits<T>::epsilon());  // ~3e-4 for fp32
+  const T sqrtEps = std::sqrt(std::numeric_limits<T>::epsilon());  // ~3e-4 for fp32
   const T baseLambda = T(0.1);
 
   std::vector<T> residuals(numPoints);
@@ -91,9 +94,9 @@ std::pair<T, glm::vec<N, T>> fitNonlinear(std::span<const T> Xs, std::span<const
 
       for(size_t i = 0; i < numPoints; ++i)
       {
-        T predicted                = func(params, Xs[i]);
-        T predictedOffset          = func(paramsOffset, Xs[i]);
-        jacobian[i * N + paramIdx] = -(predictedOffset - predicted) / delta;
+        T predicted       = func(params, Xs[i]);
+        T predictedOffset = func(paramsOffset, Xs[i]);
+        jacobian[i * N + size_t(paramIdx)] = -(predictedOffset - predicted) / delta;
       }
     }
 
@@ -104,10 +107,11 @@ std::pair<T, glm::vec<N, T>> fitNonlinear(std::span<const T> Xs, std::span<const
     {
       for(glm::length_t j = 0; j < N; ++j)
       {
-        JtJ[i][j] = T(0);
+        JtJ[size_t(i)][j] = T(0);
         for(size_t k = 0; k < numPoints; ++k)
         {
-          JtJ[i][j] += jacobian[k * N + i] * jacobian[k * N + j];
+          JtJ[size_t(i)][j] +=
+              jacobian[k * N + size_t(i)] * jacobian[k * N + size_t(j)];
         }
       }
     }
@@ -116,8 +120,8 @@ std::pair<T, glm::vec<N, T>> fitNonlinear(std::span<const T> Xs, std::span<const
     // This makes lambda adaptive to the scale of the problem
     for(glm::length_t i = 0; i < N; ++i)
     {
-      T diagonalScale = std::max(JtJ[i][i], T(1e-6));  // Avoid division by zero
-      JtJ[i][i] += baseLambda * diagonalScale;
+      T diagonalScale = std::max(JtJ[size_t(i)][i], T(1e-6));  // Avoid division by zero
+      JtJ[size_t(i)][i] += baseLambda * diagonalScale;
     }
 
     // Build -J^T * residuals (negative sign needed when J = ∂residual/∂params)
@@ -127,7 +131,7 @@ std::pair<T, glm::vec<N, T>> fitNonlinear(std::span<const T> Xs, std::span<const
       T sum = T(0);
       for(size_t k = 0; k < numPoints; ++k)
       {
-        sum -= jacobian[k * N + i] * residuals[k];
+        sum -= jacobian[k * N + size_t(i)] * residuals[k];
       }
       Jtr[i] = sum;
     }
@@ -146,7 +150,7 @@ std::pair<T, glm::vec<N, T>> fitNonlinear(std::span<const T> Xs, std::span<const
         glm::length_t maxRow = i;
         for(glm::length_t k = i + 1; k < N; ++k)
         {
-          if(std::abs(A[i][k]) > std::abs(A[i][maxRow]))
+          if(std::abs(A[size_t(i)][k]) > std::abs(A[size_t(i)][maxRow]))
             maxRow = k;
         }
 
@@ -154,13 +158,13 @@ std::pair<T, glm::vec<N, T>> fitNonlinear(std::span<const T> Xs, std::span<const
         if(maxRow != i)
         {
           for(glm::length_t k = 0; k < N; ++k)
-            std::swap(A[k][i], A[k][maxRow]);
+            std::swap(A[size_t(k)][i], A[size_t(k)][maxRow]);
           std::swap(b[i], b[maxRow]);
         }
       }
 
       // Check for singular matrix (shouldn't happen with proper damping)
-      if(std::abs(A[i][i]) < std::numeric_limits<T>::epsilon())
+      if(std::abs(A[size_t(i)][i]) < std::numeric_limits<T>::epsilon())
         break;  // Skip remaining iterations if matrix is singular
 
       // Forward elimination
@@ -168,11 +172,11 @@ std::pair<T, glm::vec<N, T>> fitNonlinear(std::span<const T> Xs, std::span<const
       {
         for(glm::length_t k = i + 1; k < N; ++k)
         {
-          T factor = A[i][k] / A[i][i];
+          T factor = A[size_t(i)][k] / A[size_t(i)][i];
           b[k] -= factor * b[i];
           for(glm::length_t j = i; j < N; ++j)
           {
-            A[j][k] -= factor * A[j][i];
+            A[size_t(j)][k] -= factor * A[size_t(j)][i];
           }
         }
       }
@@ -188,12 +192,12 @@ std::pair<T, glm::vec<N, T>> fitNonlinear(std::span<const T> Xs, std::span<const
       {
         for(glm::length_t j = i + 1; j < N; ++j)
         {
-          sum -= A[j][i] * deltaParams[j];
+          sum -= A[size_t(j)][i] * deltaParams[j];
         }
       }
       // Avoid division by zero (matrix might be singular if damping failed)
-      if(std::abs(A[i][i]) > std::numeric_limits<T>::epsilon())
-        deltaParams[i] = sum / A[i][i];
+      if(std::abs(A[size_t(i)][i]) > std::numeric_limits<T>::epsilon())
+        deltaParams[i] = sum / A[size_t(i)][i];
       else
         deltaParams[i] = T(0);
     }
@@ -221,17 +225,21 @@ void printBestFit(std::span<const T> Xs, std::span<const T> Ys)
 {
 #if 0
   for(size_t i = 0; i < Xs.size(); ++i)
-    fmt::println("{}\t{}", Xs[i], Ys[i]);
+    std::print("{}\t{}\n", Xs[i], Ys[i]);
 #endif
-  auto constant = fitNonlinear(Xs, Ys, glm::vec1(0.0f), [](const glm::vec1& v, T /* x */) { return v.x; });
+  auto constant = fitNonlinear(Xs, Ys, glm::vec1(0.0f),
+                               [](const glm::vec1& v, T /* x */) { return v.x; });
 
   if(Xs.size() < 3)
   {
-    fmt::println("Not enough data. Use constant fit: time = complexity + {}", constant.second.x);
+    std::print("Not enough data. Use constant fit: time = complexity + {}\n",
+               constant.second.x);
     return;
   }
-  auto linear    = fitNonlinear(Xs, Ys, glm::vec2(1.0f, 0.0f), [](const glm::vec2& v, T x) { return x * v.x + v.y; });
-  auto log       = fitNonlinear(Xs, Ys, glm::vec2(1.0f, 0.0f), [](const glm::vec2& v, T x) {
+  auto linear =
+      fitNonlinear(Xs, Ys, glm::vec2(1.0f, 0.0f),
+                   [](const glm::vec2& v, T x) { return x * v.x + v.y; });
+  auto log = fitNonlinear(Xs, Ys, glm::vec2(1.0f, 0.0f), [](const glm::vec2& v, T x) {
     // Transition to linear for small/negative x, match gradient at xmin
     const float xmin = 1e-3f;
     float       lx;
@@ -248,27 +256,32 @@ void printBestFit(std::span<const T> Xs, std::span<const T> Ys)
     }
     return lx;
   });
-  auto logLinear = fitNonlinear(Xs, Ys, glm::vec2(1.0f, 0.0f), [](const glm::vec2& v, T x) {
-    // x * ln(x) - handle small/negative x similar to log
-    const float xmin = 1e-3f;
-    float       xlnx;
-    if(x > xmin)
-    {
-      xlnx = v.x * x * logf(x) + v.y;
-    }
-    else
-    {
-      // (x*ln(x))' = ln(x) + 1
-      float slope     = v.x * (logf(xmin) + 1.0f);
-      float intercept = v.x * xmin * logf(xmin) + v.y - slope * xmin;
-      xlnx            = slope * x + intercept;
-    }
-    return xlnx;
-  });
-  auto quadratic = fitNonlinear(Xs, Ys, glm::vec3(0.0f, 1.0f, 0.0f),
-                                [](const glm::vec3& v, T x) { return x * x * v.x + x * v.y + v.z; });
+  auto logLinear =
+      fitNonlinear(Xs, Ys, glm::vec2(1.0f, 0.0f), [](const glm::vec2& v, T x) {
+        // x * ln(x) - handle small/negative x similar to log
+        const float xmin = 1e-3f;
+        float       xlnx;
+        if(x > xmin)
+        {
+          xlnx = v.x * x * logf(x) + v.y;
+        }
+        else
+        {
+          // (x*ln(x))' = ln(x) + 1
+          float slope     = v.x * (logf(xmin) + 1.0f);
+          float intercept = v.x * xmin * logf(xmin) + v.y - slope * xmin;
+          xlnx            = slope * x + intercept;
+        }
+        return xlnx;
+      });
+  auto quadratic =
+      fitNonlinear(Xs, Ys, glm::vec3(0.0f, 1.0f, 0.0f), [](const glm::vec3& v, T x) {
+        return x * x * v.x + x * v.y + v.z;
+      });
   auto exponential =
-      fitNonlinear(Xs, Ys, glm::vec3(1.0f, 1.0f, 0.0f), [](const glm::vec3& v, T x) { return v.x * expf(v.y * x) + v.z; });
+      fitNonlinear(Xs, Ys, glm::vec3(1.0f, 1.0f, 0.0f), [](const glm::vec3& v, T x) {
+        return v.x * expf(v.y * x) + v.z;
+      });
   auto power = fitNonlinear(Xs, Ys, glm::vec2(1.0f, 2.0f), [](const glm::vec2& v, T x) {
     // y = a * x^b - transition to linear for small/negative x to avoid zero gradient
     const float xmin = 1e-3f;
@@ -284,24 +297,29 @@ void printBestFit(std::span<const T> Xs, std::span<const T> Ys)
       return slope * x + intercept;
     }
   });
-  T best = std::min({constant.first, linear.first, log.first, logLinear.first, quadratic.first, exponential.first, power.first});
+  T best = std::min({constant.first, linear.first, log.first, logLinear.first,
+                     quadratic.first, exponential.first, power.first});
   T preferSimpler{1.1f};
   if(constant.first <= best * preferSimpler)
-    fmt::println("Fits constant best: time = {}", constant.second.x);
+    std::print("Fits constant best: time = {}\n", constant.second.x);
   else if(linear.first <= best * preferSimpler)
-    fmt::println("Fits linear best: time = {} complexity + {}", linear.second.x, linear.second.y);
+    std::print("Fits linear best: time = {} complexity + {}\n", linear.second.x,
+               linear.second.y);
   else if(quadratic.first <= best * preferSimpler)
-    fmt::println("Fits quadratic best: time = {} complexity^2 + {} complexity + {}", quadratic.second.x,
-                 quadratic.second.y, quadratic.second.z);
+    std::print("Fits quadratic best: time = {} complexity^2 + {} complexity + {}\n",
+               quadratic.second.x, quadratic.second.y, quadratic.second.z);
   else if(log.first <= best * preferSimpler)
-    fmt::println("Fits log best: time = {} ln(complexity) + {}", log.second.x, log.second.y);
+    std::print("Fits log best: time = {} ln(complexity) + {}\n", log.second.x,
+               log.second.y);
   else if(logLinear.first <= best * preferSimpler)
-    fmt::println("Fits logLinear best: time = {} complexity * ln(complexity) + {}", logLinear.second.x, logLinear.second.y);
+    std::print("Fits logLinear best: time = {} complexity * ln(complexity) + {}\n",
+               logLinear.second.x, logLinear.second.y);
   else if(exponential.first <= best * preferSimpler)
-    fmt::println("Fits exponential best: time = {} exp({} * complexity) + {}", exponential.second.x,
-                 exponential.second.y, exponential.second.z);
+    std::print("Fits exponential best: time = {} exp({} * complexity) + {}\n",
+               exponential.second.x, exponential.second.y, exponential.second.z);
   else if(power.first <= best * preferSimpler)
-    fmt::println("Fits power best: time = {} complexity^{}", power.second.x, power.second.y);
+    std::print("Fits power best: time = {} complexity^{}\n", power.second.x,
+               power.second.y);
   else
     assert(false);
 }
@@ -458,7 +476,10 @@ public:
       {
         endSubtask(Clock::now());
         assert(currentSubtask() == m_subtaskRatios.size());
-        assert(m_subtaskTimeline.value().completedEstimate / m_subtaskTimeline.value().promisedEstimate - 1.0f < 1e-6f);
+        assert(m_subtaskTimeline.value().completedEstimate
+                       / m_subtaskTimeline.value().promisedEstimate
+                   - 1.0f
+               < 1e-6f);
         m_taskTimeline.value().printRatios();
       }
       catch(const std::exception& e)
@@ -473,7 +494,7 @@ public:
   }
   TaskProgress(const TaskProgress& other)            = delete;
   TaskProgress& operator=(const TaskProgress& other) = delete;
-  void          defineSubtasks(std::vector<std::pair<std::string_view, float>>&& subtaskTimeRatios)
+  void defineSubtasks(std::vector<std::pair<std::string_view, float>>&& subtaskTimeRatios)
   {
     std::lock_guard lock(m_mutex);
     for(auto [name, ratio] : subtaskTimeRatios)
@@ -492,7 +513,8 @@ public:
       endSubtask(now);
     else
     {
-      m_taskTimeline.emplace(std::accumulate(m_subtaskRatios.begin(), m_subtaskRatios.end(), 0.0f), now);
+      m_taskTimeline.emplace(
+          std::accumulate(m_subtaskRatios.begin(), m_subtaskRatios.end(), 0.0f), now);
     }
     m_subtaskTimeline.emplace(estimateSeconds, now);
     assert(currentSubtask() < m_subtaskRatios.size());  // not enough items given to estimateSubtaskComplexities()
@@ -529,16 +551,20 @@ public:
     std::optional<Clock::duration> remaining;
     std::string                    currentWork() const
     {
-      return subtaskName.value_or("not started") + (subtaskWorkName ? std::string(" -> ") + *subtaskWorkName : "");
+      return subtaskName.value_or("not started")
+             + (subtaskWorkName ? std::string(" -> ") + *subtaskWorkName : "");
     }
     std::string toString() const
     {
       auto durationString = [](auto duration) -> std::string {
         auto seconds = std::chrono::floor<std::chrono::seconds>(duration);
-        return seconds > std::chrono::hours(1) ? fmt::format("{:%H:%M:%S}", seconds) : fmt::format("{:%M:%S}", seconds);
+        return seconds > std::chrono::hours(1) ?
+                   std::format("{:%H:%M:%S}", std::chrono::hh_mm_ss(seconds)) :
+                   std::format("{:%M:%S}", std::chrono::hh_mm_ss(seconds));
       };
-      return fmt::format("Progress: {:.1f}%, elapsed {}, remaining {} (current: {})", ratio * 100.0f,
-                         durationString(elapsed), remaining ? durationString(*remaining) : "??", currentWork());
+      return std::format("Progress: {:.1f}%, elapsed {}, remaining {} (current: {})",
+                         ratio * 100.0f, durationString(elapsed),
+                         remaining ? durationString(*remaining) : "??", currentWork());
     }
   };
 
@@ -549,23 +575,35 @@ public:
       return {std::nullopt, std::nullopt, 0.0f, Clock::duration(0), std::nullopt};
 
     auto  now             = Clock::now();
-    float subtaskProgress = m_subtaskTimeline.value().completedEstimate / m_subtaskTimeline.value().promisedEstimate;
-    float progress = (m_taskTimeline.value().completedEstimate + m_subtaskRatios.at(currentSubtask()) * subtaskProgress)
+    float subtaskProgress = m_subtaskTimeline.value().completedEstimate
+                            / m_subtaskTimeline.value().promisedEstimate;
+    float progress = (m_taskTimeline.value().completedEstimate
+                      + m_subtaskRatios.at(currentSubtask()) * subtaskProgress)
                      / m_taskTimeline.value().promisedEstimate;
-    auto elapsed                = now - m_taskTimeline.value().start;
-    auto estimatedTotalDuration = (m_subtaskTimeline.value().lastProgress - m_taskTimeline.value().start) / progress;
-    auto remaining              = std::chrono::duration_cast<Clock::duration>(estimatedTotalDuration) - elapsed;
-    remaining                   = std::max(remaining, Clock::duration(0));
-    return {m_subtaskNames.at(currentSubtask()), m_currentSubtaskWorkName, progress, elapsed, remaining};
+    auto elapsed = now - m_taskTimeline.value().start;
+    auto estimatedTotalDuration =
+        (m_subtaskTimeline.value().lastProgress - m_taskTimeline.value().start) / progress;
+    auto remaining =
+        std::chrono::duration_cast<Clock::duration>(estimatedTotalDuration) - elapsed;
+    remaining = std::max(remaining, Clock::duration(0));
+    return {m_subtaskNames.at(currentSubtask()), m_currentSubtaskWorkName,
+            progress, elapsed, remaining};
   }
 
 private:
   bool   started() const { return m_taskTimeline.has_value(); }
-  size_t currentSubtask() const { return m_taskTimeline.value().measure.size(); }
-  void   endSubtask(Clock::time_point now)
+  size_t currentSubtask() const
   {
-    assert(std::abs(m_subtaskTimeline.value().completedEstimate / m_subtaskTimeline.value().promisedEstimate - 1.0f) < 1e-6f);  // calls to makeProgress() didn't add up
-    printf("Subtask '%s' completed. Fitting estimate time to measured:\n", m_subtaskNames.at(currentSubtask()).c_str());
+    return m_taskTimeline.value().measure.size();
+  }
+  void endSubtask(Clock::time_point now)
+  {
+    assert(std::abs(m_subtaskTimeline.value().completedEstimate
+                        / m_subtaskTimeline.value().promisedEstimate
+                    - 1.0f)
+           < 1e-6f);  // calls to makeProgress() didn't add up
+    printf("Subtask '%s' completed. Fitting estimate time to measured:\n",
+           m_subtaskNames.at(currentSubtask()).c_str());
     m_subtaskTimeline.value().printBestFit();
     m_taskTimeline.value().append(m_subtaskRatios.at(currentSubtask()), now);
   }
@@ -580,9 +618,7 @@ private:
   std::optional<std::string>      m_currentSubtaskWorkName;
 
   // Complexity progress of the current subtask
-  float m_subtaskEstimate  = 0.0f;
-  float m_subtaskCompleted = 0.0f;
-  bool  m_cancel           = false;
+  bool m_cancel = false;
 };
 
 // Utility class to poll and print progress in a background thread. It starts
@@ -593,7 +629,7 @@ public:
   ProgressPrinter(TaskProgress& taskProgress)
       : m_taskProgress(taskProgress)
   {
-    m_thread = std::jthread([this]() {
+    m_thread = std::thread([this]() {
       float                lastProgressRatio = m_taskProgress.progress().ratio;
       std::chrono::seconds sleepTime(1);
       for(;;)
@@ -603,7 +639,7 @@ public:
         if(m_stop)
           return;
         auto progress = m_taskProgress.progress();
-        fmt::println("{}", progress.toString());
+        std::print("{}\n", progress.toString());
         if(progress.ratio != lastProgressRatio)
           lastProgressRatio = progress.ratio;
         else
@@ -613,15 +649,19 @@ public:
   }
   ~ProgressPrinter()
   {
-    std::unique_lock lock(m_mutex);
-    m_stop = true;
-    m_condition.notify_all();
+    {
+      std::unique_lock lock(m_mutex);
+      m_stop = true;
+      m_condition.notify_all();
+    }
+    if(m_thread.joinable())
+      m_thread.join();
   }
   ProgressPrinter(const ProgressPrinter& other)            = delete;
   ProgressPrinter& operator=(const ProgressPrinter& other) = delete;
 
 private:
-  std::jthread            m_thread;
+  std::thread             m_thread;
   std::mutex              m_mutex;
   std::condition_variable m_condition;
   bool                    m_stop = false;
