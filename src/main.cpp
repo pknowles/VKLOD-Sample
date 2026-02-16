@@ -1139,6 +1139,68 @@ private:
   bool m_showProfiler           = false;
 };
 
+// Custom surface creation function that respects windowing system preference
+template <vko::instance_commands InstanceCommands>
+vko::SurfaceKHR makeSurfaceWithPreference(const InstanceCommands& vk,
+                                          VkInstance              instance,
+                                          const vko::glfw::PlatformSupport& support,
+                                          GLFWwindow*        window,
+                                          const std::string& preference)
+{
+  // If x11 is preferred, try X11 platforms first, then fall back to default
+  if(preference == "x11")
+  {
+    std::optional<vko::SurfaceVariant> result;
+    std::string                        exceptionStrings;
+
+#if VK_KHR_xcb_surface
+    if(!result && support.xcb && vko::glfw::glfwGetXCBConnection())
+    {
+      try
+      {
+        result = vko::glfw::makeXcbSurfaceKHR(vk, instance, window);
+      }
+      catch(const vko::Exception& e)
+      {
+        exceptionStrings += std::string(e.what()) + "\n";
+      }
+    }
+#endif
+#if VK_KHR_xlib_surface
+    if(!result && support.xlib && vko::glfw::glfwGetX11Display())
+    {
+      try
+      {
+        result = vko::glfw::makeXlibSurfaceKHR(vk, instance, window);
+      }
+      catch(const vko::Exception& e)
+      {
+        exceptionStrings += std::string(e.what()) + "\n";
+      }
+    }
+#endif
+
+    if(result)
+    {
+      return vko::SurfaceKHR{std::move(*result)};
+    }
+    // X11 failed, fall through to default order
+  }
+
+  // Default order (or fallback if x11 preference failed)
+  return vko::glfw::makeSurface(vk, instance, support, window);
+}
+
+// Overload for instance_and_commands (matches original makeSurface signature)
+template <vko::instance_and_commands InstanceAndCommands>
+vko::SurfaceKHR makeSurfaceWithPreference(const InstanceAndCommands& vk,
+                                          const vko::glfw::PlatformSupport& support,
+                                          GLFWwindow*        window,
+                                          const std::string& preference)
+{
+  return makeSurfaceWithPreference(vk, vk, support, window, preference);
+}
+
 int main(int argc, char** argv)
 {
   try
@@ -1202,6 +1264,10 @@ int main(int argc, char** argv)
                                       {"validate"}, enableValidation);
     args::ValueFlag<bool> enableDlssArg(parser, "dlss", "Enables DLSS, if supported",
                                         {"dlss"}, enableDlss);
+#ifdef __linux__
+    args::ValueFlag<std::string> wsiArg(parser, "wsi", "Window system integration preference (x11 or wayland)",
+                                        {"wsi"}, "");
+#endif
 
     vko::shared_obj<Config> config;
     try
@@ -1229,6 +1295,14 @@ int main(int argc, char** argv)
       std::cerr << parser;
       return EXIT_FAILURE;
     }
+
+    // Parse windowing system preference
+    std::string windowingPreference;
+#ifdef __linux__
+    if(wsiArg)
+      windowingPreference = args::get(wsiArg);
+#endif
+
     if(gltfPath.empty())
     {
       std::print("Default bunny not found. Falling back to generated scene.\n");
@@ -1393,7 +1467,8 @@ int main(int argc, char** argv)
 
     // Create surface (after vkContext for correct destruction order)
     vko::SurfaceKHR surface =
-        vko::glfw::makeSurface(vkContext.instance, platformSupport, window.get());
+        makeSurfaceWithPreference(vkContext.instance, platformSupport,
+                                  window.get(), windowingPreference);
 
     // Initialize DLSS-RR (optional - gracefully degrade if unavailable)
     std::optional<vko::ngx::ScopedInit> ngx;
