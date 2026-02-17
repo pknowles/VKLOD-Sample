@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+#include "vko/device_address.hpp"
 #include <acceleration_structures.hpp>
 #include <nvh/nsightevents.h>
 #include <sample_allocation.hpp>
@@ -118,13 +119,7 @@ void BlasArray::cmdBuild(const vko::Device&              device,
                          VkCommandBuffer                 cmd,
                          vkobj::Buffer<VkDeviceAddress>& outputBlasAddresses)
 {
-  VkDeviceAddress addr = outputBlasAddresses.address();
-  cmdBuild(device, cmd,
-           VkStridedDeviceAddressRegionKHR{
-               .deviceAddress = addr,
-               .stride        = sizeof(VkDeviceAddress),
-               .size          = VkDeviceSize(outputBlasAddresses.size()),
-           });
+  cmdBuild(device, cmd, vko::DeviceSpan(outputBlasAddresses).regionKhr());
 }
 
 void BlasArray::cmdBuild(const vko::Device& device,
@@ -135,8 +130,9 @@ void BlasArray::cmdBuild(const vko::Device& device,
   cmdBuild(device, cmd,
            VkStridedDeviceAddressRegionKHR{
                .deviceAddress = addr + offsetof(VkAccelerationStructureInstanceKHR, accelerationStructureReference),
-               .stride = sizeof(VkAccelerationStructureInstanceKHR),
-               .size   = VkDeviceSize(outputTlasInfos.size()),
+               .stride = VkDeviceSize(sizeof(VkAccelerationStructureInstanceKHR)),
+               .size = outputTlasInfos.size()
+                       * VkDeviceSize(sizeof(VkAccelerationStructureInstanceKHR)),
            });
 }
 
@@ -163,7 +159,8 @@ void BlasArray::cmdBuild(const vko::Device& device, VkCommandBuffer cmd, VkStrid
               .pClustersBottomLevel = &custerBlasInput,
           },
   };
-  assert(m_blasInfos->size() == addresses.size);
+  assert(m_blasInfos->size() == addresses.size / addresses.stride
+         && addresses.size % addresses.stride == 0);
   VkClusterAccelerationStructureCommandsInfoNV blasCommandsInfo = {
       .sType = VK_STRUCTURE_TYPE_CLUSTER_ACCELERATION_STRUCTURE_COMMANDS_INFO_NV,
       .pNext = nullptr,
@@ -174,15 +171,10 @@ void BlasArray::cmdBuild(const vko::Device& device, VkCommandBuffer cmd, VkStrid
       .dstSizesArray =
           VkStridedDeviceAddressRegionKHR{
               .deviceAddress = 0,
-              .stride        = 0,
+              .stride        = sizeof(uint32_t),
               .size          = 0,
           },
-      .srcInfosArray =
-          VkStridedDeviceAddressRegionKHR{
-              .deviceAddress = m_blasInfos->address(),
-              .stride = sizeof(VkClusterAccelerationStructureBuildClustersBottomLevelInfoNV),
-              .size = VkDeviceSize(m_blasInfos->size()),
-          },
+      .srcInfosArray = vko::DeviceSpan(*m_blasInfos).regionKhr(),
       .srcInfosCount = 0 /* optional device/dynamic size, but we want everything */,
       .addressResolutionFlags = 0,
   };
@@ -550,25 +542,10 @@ void ClasStaging::buildClas(vkobj::Staging&    staging,
       .pNext = nullptr,
       .input = buildClasInputInfo,
       .dstImplicitData = m_clasData->address(),  // implicit meaning the driver will populate dstAddressesArray for us
-      .scratchData = m_clasScratch->address(),
-      .dstAddressesArray =
-          VkStridedDeviceAddressRegionKHR{
-              .deviceAddress = m_clasAddresses->address(),
-              .stride        = sizeof(VkDeviceAddress),
-              .size          = totalClusters,
-          },
-      .dstSizesArray =
-          VkStridedDeviceAddressRegionKHR{
-              .deviceAddress = m_clasSizes->address(),
-              .stride        = sizeof(uint32_t),
-              .size          = totalClusters,
-          },
-      .srcInfosArray =
-          VkStridedDeviceAddressRegionKHR{
-              .deviceAddress = m_clasInfo->address(),
-              .stride = sizeof(VkClusterAccelerationStructureBuildTriangleClusterInfoNV),
-              .size = totalClusters,
-          },
+      .scratchData       = m_clasScratch->address(),
+      .dstAddressesArray = vko::DeviceSpan(*m_clasAddresses).regionKhr(),
+      .dstSizesArray     = vko::DeviceSpan(*m_clasSizes).regionKhr(),
+      .srcInfosArray     = vko::DeviceSpan(*m_clasInfo).regionKhr(),
       .srcInfosCount = 0 /* optional device/dynamic size, but we want everything */,
       .addressResolutionFlags = 0,
   };
@@ -706,24 +683,14 @@ void ClasStaging::compactClas(vkobj::Staging&              staging,
       .input           = moveObjectsInputInfo,
       .dstImplicitData = 0,  // dstAddressesArray is already populated
       .scratchData     = m_clasScratch->address(),
-      .dstAddressesArray =
-          VkStridedDeviceAddressRegionKHR{
-              .deviceAddress = m_clasPackedAddresses->address(),
-              .stride        = sizeof(VkDeviceAddress),
-              .size          = totalClusters,
-          },
+      .dstAddressesArray = vko::DeviceSpan(*m_clasPackedAddresses).regionKhr(),
       .dstSizesArray =
           VkStridedDeviceAddressRegionKHR{
               .deviceAddress = 0,
               .stride        = sizeof(uint32_t),
               .size          = 0,
           },
-      .srcInfosArray =
-          VkStridedDeviceAddressRegionKHR{
-              .deviceAddress = m_clasAddresses->address(),
-              .stride = sizeof(VkClusterAccelerationStructureMoveObjectsInfoNV),
-              .size   = totalClusters,
-          },
+      .srcInfosArray = vko::DeviceSpan(*m_clasAddresses).regionKhr(),
       .srcInfosCount = 0 /* optional indirect size, but we already have totalClusters host side */,
       .addressResolutionFlags = 0,
   };
