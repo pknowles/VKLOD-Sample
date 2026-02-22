@@ -558,14 +558,15 @@ target_compile_definitions(${SAMPLE_EXECUTABLE} PRIVATE
   GLM_ENABLE_EXPERIMENTAL
   )
 
-# Install shaders. Unlike some samples, these are loaded at runtime and not embedded in the binary
+# Install for packaging
+# TODO: use cpack to combine code with the AppImage path
 set(CMAKE_INSTALL_PREFIX "${CMAKE_BINARY_DIR}/_install" CACHE PATH "Install path prefix")
-install(FILES ${GLSL_FILES} CONFIGURATIONS Release DESTINATION "bin_${CMAKE_SYSTEM_PROCESSOR}/GLSL_${SAMPLE_EXECUTABLE}")
-install(FILES ${GLSL_FILES} CONFIGURATIONS Debug DESTINATION "bin_${CMAKE_SYSTEM_PROCESSOR}_debug/GLSL_${SAMPLE_EXECUTABLE}")
-install(FILES ${DLSS_DLLS} CONFIGURATIONS Release DESTINATION "bin_${CMAKE_SYSTEM_PROCESSOR}")
-install(FILES ${DLSS_DLLS} CONFIGURATIONS Debug DESTINATION "bin_${CMAKE_SYSTEM_PROCESSOR}_debug")
-install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/doc/icon.png CONFIGURATIONS Release DESTINATION "bin_${CMAKE_SYSTEM_PROCESSOR}/media")
-install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/doc/icon.png CONFIGURATIONS Debug DESTINATION "bin_${CMAKE_SYSTEM_PROCESSOR}_debug/media")
+install(TARGETS ${SAMPLE_EXECUTABLE} RUNTIME DESTINATION ".")
+install(FILES ${GLSL_FILES} DESTINATION "shaders")
+install(FILES ${NVPRO_CORE_LEGACY_SHADERS} DESTINATION "nvpro_core_legacy/nvvkhl/shaders")
+install(FILES ${DLSS_DLLS} DESTINATION ".")
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/doc/icon.png DESTINATION "media")
+install(DIRECTORY "${DOWNLOAD_TARGET_DIR}/bunny_v2" DESTINATION "media")
 
 # Debug in the source directory to avoid having a set of relative shader include
 # paths just for debugging with visual studio
