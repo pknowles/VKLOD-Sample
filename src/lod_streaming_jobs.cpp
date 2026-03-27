@@ -17,205 +17,139 @@
 
 #include <lod_streaming_jobs.hpp>
 #include <sample_vulkan_objects.hpp>
-#include <shaders/shaders_scene.h>
+#include <shaders_scene.h>
 #include <vulkan/vulkan_core.h>
 
 namespace streaming {
 
-RequestList::RequestList(ResourceAllocator* allocator, uint32_t maxRequests, VkCommandPool initPool, VkQueue initQueue)
+RequestList::RequestList(const vko::Device&   device,
+                         vko::vma::Allocator& allocator,
+                         vkobj::Staging&      staging,
+                         VkQueue              queue,
+                         uint32_t             maxRequests)
     : m_maxRequests(maxRequests)
-    , m_requests(allocator,
+    , m_requests(device,
                  maxRequests,
-                 VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                 VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+                 VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                     | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                 VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                 allocator)
+    , m_requestCounts([&]() {
+      // Initialize m_requestCounts contents
+      shaders::StreamRequestCounts init{
+          .requestsCount = 0,
+          .requestsSize  = maxRequests,
+      };
+      auto buffer = vko::upload(staging, device, allocator, std::vector{init},
+                                VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
+                                    | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT
+                                    | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+      memoryBarrier(device, staging.commandBuffer(), VK_ACCESS_TRANSFER_WRITE_BIT,
+                    VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+      staging.submit();
+      // TODO: can this wait be moved to the caller? do we even need it?
+      vko::check(device.vkQueueWaitIdle(queue));
+      return buffer;
+    }())
 {
-  // Initialize m_requestCounts contents
-  // TODO: would be nice to consolidate these waits, but would need temp storage for the command buffer
-  vkobj::ImmediateCommandBuffer cmd(allocator->getDevice(), initPool, initQueue);
-  shaders::StreamRequestCounts  init{
-       .requestsCount = 0,
-       .requestsSize  = maxRequests,
-  };
-  m_requestCounts = vkobj::Buffer(allocator, std::vector{init},
-                                  VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                                  VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, cmd);
-  memoryBarrier(cmd, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 }
 
-void RequestList::gather(MakeRequestsProgram&    program,
-                         vkobj::Buffer<uint8_t>& groupNeededFlags,
-                         vkobj::SemaphoreValue   promisedSubmitSemaphoreState,
-                         VkCommandBuffer         cmd)
+void RequestList::gather(const vko::Device&          device,
+                         MakeRequestsProgram&        program,
+                         vko::DeviceBuffer<uint8_t>& groupNeededFlags,
+                         vko::SemaphoreValue promisedSubmitSemaphoreState,
+                         VkCommandBuffer     cmd)
 {
   shaders::BuildRequestsConstants constants{
-      .groupNeededFlagsAddress    = groupNeededFlags.address(),
-      .streamRequestCountsAddress = m_requestCounts.address(),
-      .requestsAddress            = m_requests.address(),
+      .groupNeededFlagsAddress    = groupNeededFlags,
+      .streamRequestCountsAddress = m_requestCounts,
+      .requestsAddress            = m_requests,
       .groupCount                 = uint32_t(groupNeededFlags.size()),
   };
-  memoryBarrier(cmd, VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
-                VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-  vkCmdPushConstants(cmd, program.pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(constants), &constants);
-  vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, program.pipeline);
-  vkCmdDispatch(cmd, div_ceil(uint32_t(groupNeededFlags.size()), uint32_t(STREAM_WORKGROUP_SIZE)), 1, 1);
-  memoryBarrier(cmd, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+  memoryBarrier(device, cmd, VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                VK_ACCESS_SHADER_READ_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+  device.vkCmdPushConstants(cmd, program.pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT,
+                            0, sizeof(constants), &constants);
+  device.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, program.pipeline);
+  device.vkCmdDispatch(cmd, div_ceil(uint32_t(groupNeededFlags.size()), uint32_t(STREAM_WORKGROUP_SIZE)),
+                       1, 1);
+  memoryBarrier(device, cmd, VK_ACCESS_SHADER_WRITE_BIT,
+                VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
   m_readySemaphore = promisedSubmitSemaphoreState;
 }
 
-void RequestList::download(ResourceAllocator* allocator, VkCommandPool pool, VkQueue queue, std::vector<shaders::GroupRequest>& result)
-{
-  result.clear();
-  nvvk::StagingMemoryManager* smm = allocator->getStaging();
-
-  // First download the request list count
-  const uint32_t* countPtr;
-  {
-    vkobj::BuildingCommandBuffer cmd(allocator->getDevice(), pool, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
-    countPtr = smm->cmdFromBufferT<uint32_t>(cmd, m_requestCounts, offsetof(shaders::StreamRequestCounts, requestsCount),
-                                             sizeof(shaders::StreamRequestCounts::requestsCount));
-    memoryBarrier(cmd, VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                  VK_PIPELINE_STAGE_TRANSFER_BIT);
-    vkCmdFillBuffer(cmd, m_requestCounts, offsetof(shaders::StreamRequestCounts, requestsCount),
-                    sizeof(shaders::StreamRequestCounts::requestsCount), 0);  // zero the count for buffer reuse
-    vkobj::ReadyCommandBuffer recordedCmd(std::move(cmd));
-    std::array                waits{m_readySemaphore.submitInfo(VK_PIPELINE_STAGE_2_TRANSFER_BIT)};
-    recordedCmd.submitAfter(queue, waits);
-    NVVK_CHECK(vkQueueWaitIdle(queue));
-  }
-
-  // requestsCount may overshoot due to parallel atomics
-  uint32_t count = std::min(m_maxRequests, *countPtr);
-
-  // Then download the data, if there is any
-  if(count)
-  {
-    std::span<const shaders::GroupRequest> requests;
-    {
-      vkobj::ImmediateCommandBuffer cmd(allocator->getDevice(), pool, queue);
-      requests = {smm->cmdFromBufferT<shaders::GroupRequest>(cmd, m_requests, 0, sizeof(shaders::GroupRequest) * count), count};
-    };
-    result.resize(count);
-    std::ranges::copy(requests, result.begin());
-  }
-#if 0
-  rangeSummary(std::cerr << "Requests: ", result) << "\n";
-#endif
-}
-
-GroupModsList::GroupModsList(ResourceAllocator* allocator, uint32_t maxLoadUnloads)
-    : m_loads(allocator,
+GroupModsList::GroupModsList(const vko::Device& device, vko::vma::Allocator& allocator, uint32_t maxLoadUnloads)
+    : m_loads(device,
               maxLoadUnloads,
-              VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-              VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
-    , m_unloads(allocator,
+              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+              VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+              allocator)
+    , m_unloads(device,
                 maxLoadUnloads,
-                VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                allocator)
 {
-  // Suballocate request list
-  m_groupModsList.loadGroupsAddress   = m_loads.address();
-  m_groupModsList.unloadGroupsAddress = m_unloads.address();
+  m_groupModsList.loadGroupsAddress   = m_loads;
+  m_groupModsList.loadGroupCount      = 0;
+  m_groupModsList.unloadGroupsAddress = m_unloads;
+  m_groupModsList.unloadGroupCount    = 0;
 }
 
-shaders::StreamGroupModsList GroupModsList::write(ResourceAllocator*                    allocator,
-                                                  std::span<const shaders::LoadGroup>   loads,
-                                                  std::span<const shaders::UnloadGroup> unloads,
-                                                  std::span<const ClusteredMesh>        meshes,
-                                                  std::span<const uint32_t>             meshInstanceCounts,
-                                                  VkCommandBuffer                       cmd)
-{
-  // Make sure this object is not still being read from by the GPU after a
-  // previous call to modifyGroups()
-  if(m_reuseSemaphore)
-    m_reuseSemaphore->wait(allocator->getDevice());
-
-  // Write the counts, which will be used to dispatch compute threads
-  m_groupModsList.loadGroupCount   = uint32_t(loads.size());
-  m_groupModsList.unloadGroupCount = uint32_t(unloads.size());
-
-  // Write the LoadGroup and UnloadGroup arrays that contain references to
-  // streamed data that must be added or removed
-  nvvk::StagingMemoryManager* smm = allocator->getStaging();
-  cmdStagedUpload(*smm, cmd, loads, m_loads);
-  cmdStagedUpload(*smm, cmd, unloads, m_unloads);
-
-  // Record running totals of what was loaded and unloaded. This may be used to
-  // determine worst case allocations needed
-  m_clusterCountDelta         = 0;
-  m_instanceClusterCountDelta = 0;
-  for(const shaders::LoadGroup& load : loads)
-  {
-    assert(load.groupData.clusterCount == meshes[load.meshIndex].groupClusterRanges[load.groupIndex].count);
-    m_clusterCountDelta += load.groupData.clusterCount;
-    m_instanceClusterCountDelta += load.groupData.clusterCount * meshInstanceCounts[load.meshIndex];
-  }
-  for(const shaders::UnloadGroup& unload : unloads)
-  {
-    uint32_t groupClusterCount = meshes[unload.meshIndex].groupClusterRanges[unload.groupIndex].count;
-    m_clusterCountDelta -= groupClusterCount;
-    m_instanceClusterCountDelta -= groupClusterCount * meshInstanceCounts[unload.meshIndex];
-    assert(unload.groupIndex != uint32_t(meshes[unload.meshIndex].groupGeneratedGroups.size() - 1));  // should never unload root pages
-  }
-
-  // Debugging - check there are no duplicates between loads/unloads
-#if !defined(NDEBUG)
-  std::set<std::pair<uint32_t, uint32_t>> loadids;
-  std::set<std::pair<uint32_t, uint32_t>> unloadids;
-  for(const shaders::LoadGroup& load : loads)
-    loadids.insert({load.meshIndex, load.groupIndex});
-  for(const shaders::UnloadGroup& unload : unloads)
-    unloadids.insert({unload.meshIndex, unload.groupIndex});
-  for(const shaders::LoadGroup& load : loads)
-    assert(unloadids.count({load.meshIndex, load.groupIndex}) == 0);
-  for(const shaders::UnloadGroup& unload : unloads)
-    assert(loadids.count({unload.meshIndex, unload.groupIndex}) == 0);
-#endif
-
-  // Returns the uploaded structures, which contain cluster geometry and can be used
-  // to fill CLAS build input structures
-  return m_groupModsList;
-}
-
-void GroupModsList::modifyGroups(ModifyGroupsProgram&          program,
+void GroupModsList::modifyGroups(const vko::Device&            device,
+                                 ModifyGroupsProgram&          program,
                                  vkobj::Buffer<shaders::Mesh>& meshPointers,
-                                 vkobj::SemaphoreValue         promisedSubmitSemaphoreState,
-                                 VkCommandBuffer               cmd,
-                                 uint64_t&                     totalResidentClusters,
-                                 uint64_t&                     totalResidentInstanceClusters)
+                                 vkobj::SemaphoreValue promisedSubmitSemaphoreState,
+                                 VkCommandBuffer cmd,
+                                 uint64_t&       totalResidentClusters,
+                                 uint64_t&       totalResidentInstanceClusters)
 {
   // Update running totals
-  totalResidentClusters += m_clusterCountDelta;
-  totalResidentInstanceClusters += m_instanceClusterCountDelta;
+  assert(int64_t(totalResidentClusters) >= -m_clusterCountDelta);
+  assert(int64_t(totalResidentInstanceClusters) >= -m_instanceClusterCountDelta);
+  totalResidentClusters =
+      uint64_t(std::max<int64_t>(0, int64_t(totalResidentClusters) + m_clusterCountDelta));
+  totalResidentInstanceClusters = uint64_t(std::max<int64_t>(
+      0, int64_t(totalResidentInstanceClusters) + m_instanceClusterCountDelta));
 
   // Launch compute kernels to process loads and unloads
-  memoryBarrier(cmd, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+  memoryBarrier(device, cmd, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
   if(m_groupModsList.loadGroupCount)
   {
     shaders::StreamGroupsConstants loadConstants{
-        .meshesAddress = meshPointers.address(),
+        .meshesAddress = meshPointers,
         .mods          = m_groupModsList,
         .load          = 1u,
     };
-    vkCmdPushConstants(cmd, program.pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(loadConstants), &loadConstants);
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, program.pipeline);
-    vkCmdDispatch(cmd, div_ceil(m_groupModsList.loadGroupCount, uint32_t(STREAM_WORKGROUP_SIZE)), 1, 1);
+    device.vkCmdPushConstants(cmd, program.pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT,
+                              0, sizeof(loadConstants), &loadConstants);
+    device.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, program.pipeline);
+    device.vkCmdDispatch(cmd, div_ceil(m_groupModsList.loadGroupCount, uint32_t(STREAM_WORKGROUP_SIZE)),
+                         1, 1);
   }
   if(m_groupModsList.unloadGroupCount)
   {
     shaders::StreamGroupsConstants unloadConstants{
-        .meshesAddress = meshPointers.address(),
+        .meshesAddress = meshPointers,
         .mods          = m_groupModsList,
         .load          = 0,
     };
-    vkCmdPushConstants(cmd, program.pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(unloadConstants), &unloadConstants);
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, program.pipeline);
-    vkCmdDispatch(cmd, div_ceil(m_groupModsList.unloadGroupCount, uint32_t(STREAM_WORKGROUP_SIZE)), 1, 1);
+    device.vkCmdPushConstants(cmd, program.pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT,
+                              0, sizeof(unloadConstants), &unloadConstants);
+    device.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, program.pipeline);
+    device.vkCmdDispatch(cmd, div_ceil(m_groupModsList.unloadGroupCount, uint32_t(STREAM_WORKGROUP_SIZE)),
+                         1, 1);
   }
-  memoryBarrier(cmd, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+  memoryBarrier(device, cmd, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 
   // Record the command buffer's semaphore so this object doesn't get written to
   // before the above compute shaders are finished
@@ -233,9 +167,14 @@ void RequestDependencyPipeline::queueRequests(std::span<const shaders::GroupRequ
   {
     m_globalGroupsExpected[request.decoded.globalGroup] = bool(request.decoded.load);
     if(m_globalGroupsNeeded[request.decoded.globalGroup] != bool(request.decoded.load))
+    {
       m_pendingRequests++;
+    }
     else
+    {
+      assert(m_pendingRequests > 0);
       m_pendingRequests--;
+    }
   }
 
   // Add all the requests to the main queue. This is allowed to grow
@@ -246,17 +185,20 @@ void RequestDependencyPipeline::queueRequests(std::span<const shaders::GroupRequ
     m_useDelayedRequests = true;
 }
 
-void RequestDependencyPipeline::dequeueLoadUnloadBatch(const Scene&                                     scene,
-                                                       const std::function<Result(uint32_t, uint32_t)>& emitLoad,
-                                                       const std::function<Result(uint32_t, uint32_t)>& emitUnload)
+void RequestDependencyPipeline::dequeueLoadUnloadBatch(
+    const Scene&                                     scene,
+    const std::function<Result(uint32_t, uint32_t)>& emitLoad,
+    const std::function<Result(uint32_t, uint32_t)>& emitUnload)
 {
   m_batchUnloads.clear();
-  while(!m_topLevelRequests.empty() || (m_useDelayedRequests && !m_delayedRequests.empty()))
+  while(!m_topLevelRequests.empty()
+        || (m_useDelayedRequests && !m_delayedRequests.empty()))
   {
     if(m_topLevelRequests.empty())
     {
       assert(m_useDelayedRequests && !m_delayedRequests.empty());
-      m_topLevelRequests.insert(m_topLevelRequests.end(), m_delayedRequests.begin(), m_delayedRequests.end());
+      m_topLevelRequests.insert(m_topLevelRequests.end(),
+                                m_delayedRequests.begin(), m_delayedRequests.end());
       m_delayedRequests.clear();
       m_useDelayedRequests = false;
       assert(!m_topLevelRequests.empty());
@@ -267,7 +209,8 @@ void RequestDependencyPipeline::dequeueLoadUnloadBatch(const Scene&             
 
     // Skip processing requests made outdated by newer ones from
     // queueRequests().
-    if(m_globalGroupsExpected[request.decoded.globalGroup] != bool(request.decoded.load))
+    if(m_globalGroupsExpected[request.decoded.globalGroup]
+       != bool(request.decoded.load))
     {
       m_topLevelRequests.pop_front();
       // m_pendingRequests should already be adjusted for this
@@ -284,14 +227,16 @@ void RequestDependencyPipeline::dequeueLoadUnloadBatch(const Scene&             
     }
 
     // TODO: avoid upper_bound binary search
-    auto     offsetIt        = std::ranges::upper_bound(scene.meshGroupOffsets, request.decoded.globalGroup) - 1;
+    auto offsetIt =
+        std::ranges::upper_bound(scene.meshGroupOffsets, request.decoded.globalGroup) - 1;
     uint32_t meshGroupOffset = *offsetIt;
-    uint32_t meshIndex       = uint32_t(offsetIt - scene.meshGroupOffsets.begin());
-    uint32_t meshGroupIndex  = request.decoded.globalGroup - *offsetIt;
+    uint32_t meshIndex = uint32_t(offsetIt - scene.meshGroupOffsets.begin());
+    uint32_t meshGroupIndex = request.decoded.globalGroup - *offsetIt;
     Result   result;
     if(request.decoded.load)
     {
-      result = loadGroupDependenciesRecursive(scene.meshes[meshIndex].groupGeneratedGroups, meshGroupOffset, meshIndex,
+      result = loadGroupDependenciesRecursive(scene.meshes[meshIndex].groupGeneratedGroups,
+                                              meshGroupOffset, meshIndex,
                                               meshGroupIndex, emitLoad);
 
       // Pin the page to prevent automatically unloading it due to a lost
@@ -303,10 +248,13 @@ void RequestDependencyPipeline::dequeueLoadUnloadBatch(const Scene&             
     {
       // Un-pin this group as needed to allow it and dependencies to unload
       m_globalGroupsNeeded[request.decoded.globalGroup] = false;
-      result = unloadGroupDependenciesRecursive(scene.meshes[meshIndex].groupGeneratedGroups, scene.meshes[meshIndex].groupGeneratingGroups,
-                                                meshGroupOffset, meshIndex, meshGroupIndex, emitUnload);
+      result = unloadGroupDependenciesRecursive(scene.meshes[meshIndex].groupGeneratedGroups,
+                                                scene.meshes[meshIndex].groupGeneratingGroups,
+                                                meshGroupOffset, meshIndex,
+                                                meshGroupIndex, emitUnload);
       if(result == Result::eDelay)
-        m_globalGroupsNeeded[request.decoded.globalGroup] = true;  // restore the pin as it wasn't unloaded and we'll try again later
+        m_globalGroupsNeeded[request.decoded.globalGroup] =
+            true;  // restore the pin as it wasn't unloaded and we'll try again later
     }
 
     if(result == Result::eSuccess || result == Result::eDelay)
@@ -328,11 +276,12 @@ void RequestDependencyPipeline::dequeueLoadUnloadBatch(const Scene&             
   }
 }
 
-Result RequestDependencyPipeline::loadGroupDependenciesRecursive(offset_span<offset_span<uint32_t>> meshGroupGeneratedGroups,
-                                                                 uint32_t meshGroupOffset,
-                                                                 uint32_t meshIndex,
-                                                                 uint32_t meshGroupIndex,
-                                                                 const std::function<Result(uint32_t, uint32_t)>& emitLoad)
+Result RequestDependencyPipeline::loadGroupDependenciesRecursive(
+    offset_span<offset_span<uint32_t>>               meshGroupGeneratedGroups,
+    uint32_t                                         meshGroupOffset,
+    uint32_t                                         meshIndex,
+    uint32_t                                         meshGroupIndex,
+    const std::function<Result(uint32_t, uint32_t)>& emitLoad)
 {
   Result result = Result::eSuccess;
 
@@ -343,7 +292,8 @@ Result RequestDependencyPipeline::loadGroupDependenciesRecursive(offset_span<off
   // Load the group dependencies first to guarantee dependency order.
   for(uint32_t dependency : meshGroupGeneratedGroups[meshGroupIndex])
   {
-    result = loadGroupDependenciesRecursive(meshGroupGeneratedGroups, meshGroupOffset, meshIndex, dependency, emitLoad);
+    result = loadGroupDependenciesRecursive(meshGroupGeneratedGroups, meshGroupOffset,
+                                            meshIndex, dependency, emitLoad);
     if(result != Result::eSuccess)
       return result;
   }
@@ -362,12 +312,13 @@ Result RequestDependencyPipeline::loadGroupDependenciesRecursive(offset_span<off
   return result;
 }
 
-Result RequestDependencyPipeline::unloadGroupDependenciesRecursive(offset_span<offset_span<uint32_t>> meshGroupGeneratedGroups,
-                                                                   offset_span<offset_span<uint32_t>> meshGroupGeneratingGroups,
-                                                                   uint32_t meshGroupOffset,
-                                                                   uint32_t meshIndex,
-                                                                   uint32_t meshGroupIndex,
-                                                                   const std::function<Result(uint32_t, uint32_t)>& emitUnload)
+Result RequestDependencyPipeline::unloadGroupDependenciesRecursive(
+    offset_span<offset_span<uint32_t>>               meshGroupGeneratedGroups,
+    offset_span<offset_span<uint32_t>>               meshGroupGeneratingGroups,
+    uint32_t                                         meshGroupOffset,
+    uint32_t                                         meshIndex,
+    uint32_t                                         meshGroupIndex,
+    const std::function<Result(uint32_t, uint32_t)>& emitUnload)
 {
   Result result = Result::eSuccess;
 
@@ -397,7 +348,8 @@ Result RequestDependencyPipeline::unloadGroupDependenciesRecursive(offset_span<o
     // dependency order.
     for(uint32_t dependency : meshGroupGeneratedGroups[meshGroupIndex])
     {
-      result = unloadGroupDependenciesRecursive(meshGroupGeneratedGroups, meshGroupGeneratingGroups, meshGroupOffset,
+      result = unloadGroupDependenciesRecursive(meshGroupGeneratedGroups,
+                                                meshGroupGeneratingGroups, meshGroupOffset,
                                                 meshIndex, dependency, emitUnload);
       if(result != Result::eSuccess)
         return result;

@@ -32,6 +32,23 @@ std::any moveAny(T&& obj)
 
 struct Garbage
 {
-  std::any              object;
+  std::any object;
   vkobj::SemaphoreValue semaphoreState;  // don't free the object until this is signalled
 };
+
+inline void emptyUnusedGarbage(std::queue<Garbage>& garbage, const vko::Device& device)
+{
+  while(!garbage.empty() && garbage.front().semaphoreState.isSignaled(device))
+  {
+    garbage.pop();
+  }
+}
+
+inline void waitAndEmptyGarbage(std::queue<Garbage>& garbage, const vko::Device& device)
+{
+  while(!garbage.empty())
+  {
+    garbage.front().semaphoreState.wait(device);
+    garbage.pop();
+  }
+}

@@ -16,12 +16,12 @@
 // std::span(cgltf.ptr, cgltf.count)
 
 #include <cgltf.h>
+#include <decodeless/mappedfile.hpp>
 #include <filesystem>
 #include <glm/glm.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <memory>
 #include <meshops_array_view.h>
-#include <nvh/filemapping.hpp>
 #include <optional>
 #include <ranges>
 #include <span>
@@ -30,25 +30,6 @@
 #include <type_traits>
 
 namespace fs = std::filesystem;
-
-class MappedFile
-{
-public:
-  MappedFile(const fs::path& path)
-      : m_mapping(std::make_unique<nvh::FileReadMapping>())
-  {
-    m_mapping->open(path.string().c_str());
-    if(!m_mapping->valid())
-      throw std::runtime_error("Failed to map file '" + path.string() + "'");
-  }
-
-  const void* data() const { return m_mapping->data(); }
-  size_t      size() const { return m_mapping->size(); }
-
-private:
-  // FileReadMapping is not safe to move
-  std::unique_ptr<nvh::FileReadMapping> m_mapping;
-};
 
 static const char* getError(cgltf_result result, cgltf_data* data)
 {
@@ -70,7 +51,9 @@ static const char* getError(cgltf_result result, cgltf_data* data)
 }
 
 using UniqueCgltfData = std::unique_ptr<cgltf_data, decltype(&cgltf_free)>;
-inline UniqueCgltfData makeUniqueCgltfData(const void* inputData, size_t inputSize, const cgltf_options& options)
+inline UniqueCgltfData makeUniqueCgltfData(const void*          inputData,
+                                           size_t               inputSize,
+                                           const cgltf_options& options)
 {
   cgltf_data*  data   = nullptr;
   cgltf_result result = cgltf_parse(&options, inputData, inputSize, &data);
@@ -151,7 +134,9 @@ inline glm::mat4 getLocalMatrix(const cgltf_node& node)
   glm::mat4 matrix{1.0f};
 
   if(node.has_translation)
-    translation = glm::translate(translation, glm::vec3(node.translation[0], node.translation[1], node.translation[2]));
+    translation = glm::translate(translation, glm::vec3(node.translation[0],
+                                                        node.translation[1],
+                                                        node.translation[2]));
   if(node.has_scale)
     scale = glm::scale(scale, glm::vec3(node.scale[0], node.scale[1], node.scale[2]));
   if(node.has_rotation)
@@ -174,7 +159,8 @@ template <class CgltfType, class cgltf_type>
 auto cgltf_wrap(const std::span<cgltf_type>& span)
 {
   return span | std::ranges::views::transform([](cgltf_type& obj) {
-           if constexpr(std::is_pointer_v<cgltf_type> && !std::is_constructible_v<CgltfType, cgltf_type>)
+           if constexpr(std::is_pointer_v<cgltf_type>
+                        && !std::is_constructible_v<CgltfType, cgltf_type>)
              return CgltfType(*obj);
            else
              return CgltfType(obj);
@@ -188,20 +174,28 @@ public:
   CgltfAccessor() = default;
   explicit CgltfAccessor(const cgltf_accessor& accessor)
       : cgltf_accessor(accessor)
-      , meshops::ArrayView<const T>(reinterpret_cast<const T*>(data()), count, stride())
+      , meshops::ArrayView<const T>(reinterpret_cast<const T*>(data()),
+                                    count,
+                                    ptrdiff_t(stride()))
   {
     using dT = std::decay_t<T>;
-    if(accessor.component_type != cgltf_type_traits<dT>::component_type || accessor.type != cgltf_type_traits<dT>::type)
-      throw std::runtime_error(std::string("Invalid accessor. Got ") + cgltfTypeName(accessor.component_type, accessor.type)
+    if(accessor.component_type != cgltf_type_traits<dT>::component_type
+       || accessor.type != cgltf_type_traits<dT>::type)
+      throw std::runtime_error(std::string("Invalid accessor. Got ")
+                               + cgltfTypeName(accessor.component_type, accessor.type)
                                + ", expecting " + cgltf_type_traits<T>::name);
   }
 
 private:
   const void* data() const
   {
-    return reinterpret_cast<std::byte*>(buffer_view->buffer->data) + buffer_view->offset + offset;
+    return reinterpret_cast<std::byte*>(buffer_view->buffer->data)
+           + buffer_view->offset + offset;
   }
-  size_t                stride() const { return buffer_view->stride ? buffer_view->stride : base().stride; }
+  size_t stride() const
+  {
+    return buffer_view->stride ? buffer_view->stride : base().stride;
+  }
   const cgltf_accessor& base() const { return *this; }
 };
 
@@ -216,21 +210,36 @@ public:
   template <class T>
   bool has_indices() const
   {
-    return base().indices != nullptr && base().indices->type == cgltf_type_traits<T>::type
+    return base().indices != nullptr
+           && base().indices->type == cgltf_type_traits<T>::type
            && base().indices->component_type == cgltf_type_traits<T>::component_type;
   }
   size_t triangleCount() const { return base().indices->count / 3u; }
   //CgltfMaterial material() const { return {base().material}; }
-  std::span<const cgltf_attribute>        attributes_c() const { return {base().attributes, attributes_count}; }
-  std::span<const cgltf_material_mapping> mappings_c() const { return {base().mappings, mappings_count}; }
-  std::span<const cgltf_morph_target>     targets_c() const { return {base().targets, targets_count}; }
-  std::span<const cgltf_extension>        extensions_c() const { return {base().extensions, extensions_count}; }
+  std::span<const cgltf_attribute> attributes_c() const
+  {
+    return {base().attributes, attributes_count};
+  }
+  std::span<const cgltf_material_mapping> mappings_c() const
+  {
+    return {base().mappings, mappings_count};
+  }
+  std::span<const cgltf_morph_target> targets_c() const
+  {
+    return {base().targets, targets_count};
+  }
+  std::span<const cgltf_extension> extensions_c() const
+  {
+    return {base().extensions, extensions_count};
+  }
   template <class T>
   std::optional<CgltfAccessor<T>> attribute(const cgltf_attribute_type& type) const
   {
     std::optional<CgltfAccessor<T>> result;
     auto                            attrs = attributes_c();
-    auto attr = std::ranges::find_if(attrs, [&type](const auto& a) { return a.type == type; });
+    auto attr = std::ranges::find_if(attrs, [&type](const auto& a) {
+      return a.type == type;
+    });
     if(attr != attrs.end())
       result.emplace(*attr->data);
     return result;
@@ -243,12 +252,27 @@ private:
 class CgltfMesh : public cgltf_mesh
 {
 public:
-  std::span<const cgltf_primitive> primitives_c() const { return {base().primitives, primitives_count}; }
-  auto                             primitives() const { return cgltf_wrap<CgltfPrimitive>(primitives_c()); }
-  std::span<const cgltf_float>     weights() const { return {base().weights, weights_count}; }
-  std::span<char const* const>     target_names_c() const { return {base().target_names, target_names_count}; }
-  auto                             target_names() const { return cgltf_wrap<std::string_view>(target_names_c()); }
-  std::span<const cgltf_extension> extensions_c() const { return {base().extensions, extensions_count}; }
+  std::span<const cgltf_primitive> primitives_c() const
+  {
+    return {base().primitives, primitives_count};
+  }
+  auto primitives() const { return cgltf_wrap<CgltfPrimitive>(primitives_c()); }
+  std::span<const cgltf_float> weights() const
+  {
+    return {base().weights, weights_count};
+  }
+  std::span<char const* const> target_names_c() const
+  {
+    return {base().target_names, target_names_count};
+  }
+  auto target_names() const
+  {
+    return cgltf_wrap<std::string_view>(target_names_c());
+  }
+  std::span<const cgltf_extension> extensions_c() const
+  {
+    return {base().extensions, extensions_count};
+  }
 
 private:
   const cgltf_mesh& base() const { return *this; }
@@ -257,13 +281,28 @@ private:
 class CgltfNode : public cgltf_node
 {
 public:
-  std::optional<CgltfNode> parent() { return base().parent ? std::optional<CgltfNode>{*base().parent} : std::nullopt; }
-  std::optional<CgltfMesh> mesh() { return base().mesh ? std::optional<CgltfMesh>{*base().mesh} : std::nullopt; }
-  std::span<cgltf_node const* const> children_c() const { return {base().children, base().children_count}; }
-  auto                               children() const { return cgltf_wrap<CgltfNode>(children_c()); }
-  std::span<const cgltf_float>       weights() const { return {base().weights, weights_count}; }
-  std::span<const cgltf_extension>   extensions_c() const { return {base().extensions, extensions_count}; }
-  glm::mat4                          transform() const { return getLocalMatrix(base()); }
+  std::optional<CgltfNode> parent()
+  {
+    return base().parent ? std::optional<CgltfNode>{*base().parent} : std::nullopt;
+  }
+  std::optional<CgltfMesh> mesh()
+  {
+    return base().mesh ? std::optional<CgltfMesh>{*base().mesh} : std::nullopt;
+  }
+  std::span<cgltf_node const* const> children_c() const
+  {
+    return {base().children, base().children_count};
+  }
+  auto children() const { return cgltf_wrap<CgltfNode>(children_c()); }
+  std::span<const cgltf_float> weights() const
+  {
+    return {base().weights, weights_count};
+  }
+  std::span<const cgltf_extension> extensions_c() const
+  {
+    return {base().extensions, extensions_count};
+  }
+  glm::mat4 transform() const { return getLocalMatrix(base()); }
 
   // Provide access to the original cgltf types
   const cgltf_node* operator->() const { return &base(); }
@@ -275,9 +314,15 @@ private:
 class CgltfScene : public cgltf_scene
 {
 public:
-  std::span<cgltf_node const* const> nodes_c() const { return {base().nodes, base().nodes_count}; }
-  auto                               nodes() const { return cgltf_wrap<CgltfNode>(nodes_c()); }
-  std::span<const cgltf_extension>   extensions_c() const { return {base().extensions, extensions_count}; }
+  std::span<cgltf_node const* const> nodes_c() const
+  {
+    return {base().nodes, base().nodes_count};
+  }
+  auto nodes() const { return cgltf_wrap<CgltfNode>(nodes_c()); }
+  std::span<const cgltf_extension> extensions_c() const
+  {
+    return {base().extensions, extensions_count};
+  }
 
 private:
   const cgltf_scene& base() const { return *this; }
@@ -291,14 +336,15 @@ public:
       , m_data(makeUniqueCgltfData(m_mappedFile.data(), m_mappedFile.size(), options))
   {
     // Duplicate cgltf_load_buffers() functionality but with file mapping
-    if(buffers_c().size() && buffers_c()[0].data == nullptr && buffers_c()[0].uri == nullptr && m_data->bin != nullptr)
+    if(buffers_c().size() && buffers_c()[0].data == nullptr
+       && buffers_c()[0].uri == nullptr && m_data->bin != nullptr)
     {
       if(m_data->bin_size < buffers_c()[0].size)
       {
         throw std::runtime_error("data too short");  // ??
       }
 
-      m_data->buffers[0].data             = const_cast<void*>(m_data->bin);  // DANGER: const_cast
+      m_data->buffers[0].data = const_cast<void*>(m_data->bin);  // DANGER: const_cast
       m_data->buffers[0].data_free_method = cgltf_data_free_method_none;
     }
     for(auto& buffer : std::span{m_data->buffers, m_data->buffers_count})
@@ -310,38 +356,78 @@ public:
         throw std::runtime_error("data uri not implemented");
       }
       m_secondaryFiles.emplace_back((path.parent_path() / buffer.uri).string());
-      buffer.data = reinterpret_cast<char*>(const_cast<void*>(m_secondaryFiles.back().data()));  // DANGER: const_cast
+      buffer.data = reinterpret_cast<char*>(
+          const_cast<void*>(m_secondaryFiles.back().data()));  // DANGER: const_cast
       buffer.data_free_method = cgltf_data_free_method_none;
     }
   }
   const cgltf_data& operator&() const { return *m_data; }
   const cgltf_data* operator->() const { return &*m_data; }
 
-  std::span<const cgltf_mesh>        meshes_c() const { return {m_data->meshes, m_data->meshes_count}; }
-  auto                               meshes() const { return cgltf_wrap<CgltfMesh>(meshes_c()); }
-  std::span<const cgltf_accessor>    accessors_c() const { return {m_data->accessors, m_data->accessors_count}; }
+  std::span<const cgltf_mesh> meshes_c() const
+  {
+    return {m_data->meshes, m_data->meshes_count};
+  }
+  auto meshes() const { return cgltf_wrap<CgltfMesh>(meshes_c()); }
+  std::span<const cgltf_accessor> accessors_c() const
+  {
+    return {m_data->accessors, m_data->accessors_count};
+  }
   std::span<const cgltf_buffer_view> buffer_views_c() const
   {
     return {m_data->buffer_views, m_data->buffer_views_count};
   }
-  std::span<const cgltf_buffer>  buffers_c() const { return {m_data->buffers, m_data->buffers_count}; }
-  std::span<const cgltf_image>   images_c() const { return {m_data->images, m_data->images_count}; }
-  std::span<const cgltf_texture> textures_c() const { return {m_data->textures, m_data->textures_count}; }
-  std::span<const cgltf_sampler> samplers_c() const { return {m_data->samplers, m_data->samplers_count}; }
-  std::span<const cgltf_skin>    skins_c() const { return {m_data->skins, m_data->skins_count}; }
-  std::span<const cgltf_camera>  cameras_c() const { return {m_data->cameras, m_data->cameras_count}; }
-  std::span<const cgltf_light>   lights_c() const { return {m_data->lights, m_data->lights_count}; }
-  std::span<const cgltf_node>    nodes_c() const { return {m_data->nodes, m_data->nodes_count}; }
-  auto                           nodes() const { return cgltf_wrap<CgltfNode>(nodes_c()); }
-  std::span<const cgltf_scene>   scenes_c() const { return {m_data->scenes, m_data->scenes_count}; }
-  auto                           scenes() const { return cgltf_wrap<CgltfScene>(scenes_c()); }
-  std::optional<CgltfScene>      scene() const
+  std::span<const cgltf_buffer> buffers_c() const
+  {
+    return {m_data->buffers, m_data->buffers_count};
+  }
+  std::span<const cgltf_image> images_c() const
+  {
+    return {m_data->images, m_data->images_count};
+  }
+  std::span<const cgltf_texture> textures_c() const
+  {
+    return {m_data->textures, m_data->textures_count};
+  }
+  std::span<const cgltf_sampler> samplers_c() const
+  {
+    return {m_data->samplers, m_data->samplers_count};
+  }
+  std::span<const cgltf_skin> skins_c() const
+  {
+    return {m_data->skins, m_data->skins_count};
+  }
+  std::span<const cgltf_camera> cameras_c() const
+  {
+    return {m_data->cameras, m_data->cameras_count};
+  }
+  std::span<const cgltf_light> lights_c() const
+  {
+    return {m_data->lights, m_data->lights_count};
+  }
+  std::span<const cgltf_node> nodes_c() const
+  {
+    return {m_data->nodes, m_data->nodes_count};
+  }
+  auto nodes() const { return cgltf_wrap<CgltfNode>(nodes_c()); }
+  std::span<const cgltf_scene> scenes_c() const
+  {
+    return {m_data->scenes, m_data->scenes_count};
+  }
+  auto scenes() const { return cgltf_wrap<CgltfScene>(scenes_c()); }
+  std::optional<CgltfScene> scene() const
   {
     return m_data->scene ? std::optional<CgltfScene>{*m_data->scene} : std::nullopt;
   }
-  std::span<const cgltf_animation> animations_c() const { return {m_data->animations, m_data->animations_count}; }
-  std::span<const cgltf_material_variant> variants_c() const { return {m_data->variants, m_data->variants_count}; }
-  std::span<const cgltf_extension>        data_extensions_c() const
+  std::span<const cgltf_animation> animations_c() const
+  {
+    return {m_data->animations, m_data->animations_count};
+  }
+  std::span<const cgltf_material_variant> variants_c() const
+  {
+    return {m_data->variants, m_data->variants_count};
+  }
+  std::span<const cgltf_extension> data_extensions_c() const
   {
     return {m_data->data_extensions, m_data->data_extensions_count};
   }
@@ -349,17 +435,23 @@ public:
   {
     return {m_data->extensions_used, m_data->extensions_used_count};
   }
-  auto                         extensions_used() const { return cgltf_wrap<std::string_view>(extensions_used_c()); }
+  auto extensions_used() const
+  {
+    return cgltf_wrap<std::string_view>(extensions_used_c());
+  }
   std::span<char const* const> extensions_required_c() const
   {
     return {m_data->extensions_required, m_data->extensions_required_count};
   }
-  auto extensions_required() const { return cgltf_wrap<std::string_view>(extensions_required_c()); }
+  auto extensions_required() const
+  {
+    return cgltf_wrap<std::string_view>(extensions_required_c());
+  }
 
 private:
-  MappedFile              m_mappedFile;
-  std::vector<MappedFile> m_secondaryFiles;
-  UniqueCgltfData         m_data;
+  decodeless::file              m_mappedFile;
+  std::vector<decodeless::file> m_secondaryFiles;
+  UniqueCgltfData               m_data;
 };
 
 // clang-format off
@@ -376,5 +468,6 @@ template <class T> using cgltf_wrapper_t = typename cgltf_wrapper_traits<T>::wra
 // Define a shortcut for the type returned by the range wrappers. Use a lambda
 // since std::result_of_t fails with templates
 template <class T>
-using cgltf_wrap_result_t =
-    decltype([](const std::span<T>& span) { return cgltf_wrap<cgltf_wrapper_t<T>, T>(span); }(std::declval<std::span<T>>()));
+using cgltf_wrap_result_t = decltype([](const std::span<T>& span) {
+  return cgltf_wrap<cgltf_wrapper_t<T>, T>(span);
+}(std::declval<std::span<T>>()));

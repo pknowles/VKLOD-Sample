@@ -28,24 +28,24 @@
 #include <nvcluster/nvcluster.h>
 #include <nvclusterlod/nvclusterlod_hierarchy.h>
 #include <nvclusterlod/nvclusterlod_hierarchy_storage.hpp>
+
 #include <nvclusterlod/nvclusterlod_mesh.h>
 #include <nvclusterlod/nvclusterlod_mesh_storage.hpp>
-#include <nvh/alignment.hpp>
 #include <ranges>
 #include <sample_allocation.hpp>
 #include <sample_image.hpp>
 #include <sample_vulkan_objects.hpp>
-#include <shaders/shaders_scene.h>
-#include <shaders/traverse_device_host.h>
+#include <shaders_scene.h>
 #include <stdlib.h>
+#include <traverse_device_host.h>
 #include <vulkan/vulkan_core.h>
 
 // The render cache is a memory mapped file of raw structs. This version is used
 // to invalidate it after making a binary-incompatible change to the relevant
 // structs below
-#define SCENE_RENDERCACHE_VERSION 7
+#define SCENE_RENDERCACHE_VERSION 8
 
-namespace fs            = std::filesystem;
+namespace fs = std::filesystem;
 
 using file_writer = decodeless::file_writer;
 
@@ -81,7 +81,10 @@ struct Mesh;
 // triangles.
 struct Cluster
 {
-  Cluster(const Mesh& baseMesh, std::span<const glm::uvec3> triangleIndices, std::span<const uint32_t> vertexIndices, file_writer& alloc);
+  Cluster(const Mesh&                 baseMesh,
+          std::span<const glm::uvec3> triangleIndices,
+          std::span<const uint32_t>   vertexIndices,
+          file_writer&                alloc);
   offset_span<glm::u8vec3> meshTriIndices;
   offset_span<glm::vec3>   meshPositions;
   offset_span<glm::vec3>   meshNormals;
@@ -100,18 +103,24 @@ struct LodHierarchyView
 // Per-mesh data for the scene
 struct ClusteredMesh
 {
-  ClusteredMesh(nvclusterlod_Context context, const Mesh& mesh, const SceneLodConfig& lodConfig, file_writer& alloc);
-  ClusteredMesh(nvclusterlod_Context context, const Mesh& baseMesh, nvclusterlod::LocalizedLodMesh&& lodMesh, file_writer& alloc);
-  LodHierarchyView                   hierarchy;
-  offset_span<nvcluster_Range>       clusterTriangleRanges;
-  offset_span<nvcluster_Range>       clusterVertexRanges;
-  Cluster                            clusteredMesh;
-  offset_span<nvcluster_Range>       lodLevelGroups;  // needed for fixed LOD
-  offset_span<uint32_t>              clusterGeneratingGroups;
-  offset_span<nvcluster_Range>       groupClusterRanges;
+  ClusteredMesh(nvclusterlod_Context  context,
+                const Mesh&           mesh,
+                const SceneLodConfig& lodConfig,
+                file_writer&          alloc);
+  ClusteredMesh(nvclusterlod_Context             context,
+                const Mesh&                      baseMesh,
+                nvclusterlod::LocalizedLodMesh&& lodMesh,
+                file_writer&                     alloc);
+  LodHierarchyView             hierarchy;
+  offset_span<nvcluster_Range> clusterTriangleRanges;
+  offset_span<nvcluster_Range> clusterVertexRanges;
+  Cluster                      clusteredMesh;
+  offset_span<nvcluster_Range> lodLevelGroups;  // needed for fixed LOD
+  offset_span<uint32_t>        clusterGeneratingGroups;
+  offset_span<nvcluster_Range> groupClusterRanges;
   offset_span<offset_span<uint32_t>> groupGeneratingGroups;  // TODO: replace with linearized array?
-  offset_span<offset_span<uint32_t>> groupGeneratedGroups;   // TODO: rename/too similar
-  AABB                               aabb;
+  offset_span<offset_span<uint32_t>> groupGeneratedGroups;  // TODO: rename/too similar
+  AABB aabb;
 };
 
 // Scene geometry data for one group of clusters in vulkan buffers. This is the
@@ -119,30 +128,36 @@ struct ClusteredMesh
 class ClusterGroupGeometryVk
 {
 public:
-  ClusterGroupGeometryVk(ResourceAllocator*   allocator,
+  ClusterGroupGeometryVk(const vko::Device&   device,
+                         vkobj::Staging&      staging,
                          VkBuffer             memoryBuffer,
                          PoolAllocator&       memoryPool,
                          const ClusteredMesh& mesh,
-                         uint32_t             groupIndex,
-                         VkCommandBuffer      transferCmd);
+                         uint32_t             groupIndex);
 
   vkobj::DeviceAddress<shaders::ClusterGeometry> clusterGeometryAddressesAddress() const
   {
     return m_clusterGeometryAddressesAddress;
   }
 
-  vkobj::DeviceAddress<uint32_t> clusterGeneratingGroupsAddress() const { return m_clusterGeneratingGroupsAddress; }
+  vkobj::DeviceAddress<uint32_t> clusterGeneratingGroupsAddress() const
+  {
+    return m_clusterGeneratingGroupsAddress;
+  }
 
   // DANGER: this GPU data is not populated until after CLASes are built. That
   // can only happen after the geometry is uploaded. It is only stored here to
   // combine it in the same allocation.
-  vkobj::DeviceAddress<VkDeviceAddress> clasAddressesAddress() const { return m_clasAddressesAddress; }
+  vkobj::DeviceAddress<VkDeviceAddress> clasAddressesAddress() const
+  {
+    return m_clasAddressesAddress;
+  }
 
 private:
-  PoolMemory                                     m_alloc;
+  PoolMemory m_alloc;
   vkobj::DeviceAddress<shaders::ClusterGeometry> m_clusterGeometryAddressesAddress;
-  vkobj::DeviceAddress<uint32_t>                 m_clusterGeneratingGroupsAddress;
-  vkobj::DeviceAddress<VkDeviceAddress>          m_clasAddressesAddress;
+  vkobj::DeviceAddress<uint32_t>        m_clusterGeneratingGroupsAddress;
+  vkobj::DeviceAddress<VkDeviceAddress> m_clasAddressesAddress;
 };
 
 // Limits of the scene, used by various systems for conservative allocation
@@ -183,11 +198,11 @@ struct Scene
   offset_span<ClusteredMesh> meshes;
   offset_span<Instance>      instances;
   offset_span<SceneImage>    images;
-  offset_span<uint32_t>      meshGroupOffsets;    // includes total count in the last element
-  offset_span<uint32_t>      meshInstanceCounts;  // Number of instances referencing each mesh
-  SceneCounts                counts;
-  AABB                       worldAABB                     = AABB::make_empty();
-  float                      maxWorldDiagonalInObjectSpace = 0.0f;
+  offset_span<uint32_t> meshGroupOffsets;  // includes total count in the last element
+  offset_span<uint32_t> meshInstanceCounts;  // Number of instances referencing each mesh
+  SceneCounts counts;
+  AABB        worldAABB                     = AABB::make_empty();
+  float       maxWorldDiagonalInObjectSpace = 0.0f;
 };
 
 // A render cache file memory mapping and a pointer into it
@@ -199,25 +214,35 @@ struct SceneFile
   decodeless::file memoryMap;
 };
 
-std::optional<SceneFile> makeSceneFromCache(const fs::path& gltfPath, const fs::path& cachePath);
-SceneFile makeSceneFromGltf(const fs::path& gltfPath, const fs::path& cachePath, const SceneLodConfig& lodConfig, TaskProgress& progress);
-SceneFile makeSceneFromGenerated(GeneratedScene&& generatedScene, const fs::path& cachePath, const SceneLodConfig& lodConfig, TaskProgress& progress);
+std::optional<SceneFile> makeSceneFromCache(const fs::path& gltfPath,
+                                            const fs::path& cachePath);
+SceneFile                makeSceneFromGltf(const fs::path&       gltfPath,
+                                           const fs::path&       cachePath,
+                                           const SceneLodConfig& lodConfig,
+                                           TaskProgress&         progress);
+SceneFile                makeSceneFromGenerated(GeneratedScene&&      generatedScene,
+                                                const fs::path&       cachePath,
+                                                const SceneLodConfig& lodConfig,
+                                                TaskProgress&         progress);
 
 // Per-mesh vulkan data for rendering
 struct ClusteredMeshVk
 {
-  ClusteredMeshVk(ResourceAllocator* allocator, const ClusteredMesh& clusteredMesh, VkCommandBuffer transferCmd);
+  ClusteredMeshVk(vkobj::Staging&      staging,
+                  const vko::Device&   device,
+                  vko::vma::Allocator& allocator,
+                  const ClusteredMesh& clusteredMesh);
   vkobj::Buffer<nvclusterlod_HierarchyNode> nodes;
-  vkobj::Buffer<shaders::ClusterGroup>      groups;               // Streaming indirection
-  vkobj::Buffer<float>                      groupQuadricErrors;   // For traversal without streaming
-  vkobj::Buffer<nvclusterlod_Sphere>        groupBoundingSphers;  // For traversal without streaming
-  vkobj::Buffer<uint8_t>                    groupLodLevels;       // visualization only
+  vkobj::Buffer<shaders::ClusterGroup>      groups;  // Streaming indirection
+  vkobj::Buffer<float> groupQuadricErrors;  // For traversal without streaming
+  vkobj::Buffer<nvclusterlod_Sphere> groupBoundingSphers;  // For traversal without streaming
+  vkobj::Buffer<uint8_t> groupLodLevels;                   // visualization only
   static_assert(sizeof(nvclusterlod_Sphere) == sizeof(float) * 4);
 
   VkDeviceSize deviceMemoryUsage() const
   {
-    return nodes.size_bytes() + groups.size_bytes() + groupQuadricErrors.size_bytes() + groupBoundingSphers.size_bytes()
-           + groupLodLevels.size_bytes();
+    return nodes.sizeBytes() + groups.sizeBytes() + groupQuadricErrors.sizeBytes()
+           + groupBoundingSphers.sizeBytes() + groupLodLevels.sizeBytes();
   }
 };
 
@@ -226,13 +251,19 @@ struct ClusteredMeshVk
 // and not owned by SceneVK.
 struct SceneVK
 {
-  SceneVK(ResourceAllocator* allocator, const Scene& scene, VkCommandPool initPool, VkQueue initQueue);
+  SceneVK(vkobj::Staging&      staging,
+          const vko::Device&   device,
+          vko::vma::Allocator& allocator,
+          VkQueue              queue,
+          const Scene&         scene);
 
   // Clears pointers to streamed memory. Used when re-creating the streaming object.
   // DANGER: dangling pointers if we forget
   // Perhaps SceneVK should be mutable and own ClusterGroupGeometryVk objects,
   // plumbed through from the streaming thread.
-  void cmdResetStreaming(ResourceAllocator* allocator, const Scene& scene, VkCommandBuffer cmd);
+  void cmdResetStreaming(const vko::Device&       device,
+                         const Scene&             scene,
+                         vkobj::DedicatedStaging& staging);
 
   VkDeviceSize deviceMemoryUsage() const { return staticDeviceMemoryUsage; }
 
@@ -262,11 +293,8 @@ inline std::ostream& operator<<(std::ostream& os, const shaders::Material& x)
   using numerical_chars::operator<<;
   os << "Material{\n";
   os << "  albedo " << x.albedo << "\n";
-  numerical_chars::operator<<(os, x.albedoTexture);
   os << "  albedoTexture " << x.albedoTexture << "\n";
   os << "  metallicRoughnessTexture " << x.metallicRoughnessTexture << "\n";
-  os << "  padding2 " << x.padding2 << "\n";
-  os << "  padding3 " << x.padding3 << "\n";
   os << "  roughness " << x.roughness << "\n";
   os << "  metallic " << x.metallic << "\n";
   os << "}";
@@ -279,11 +307,16 @@ inline std::ostream& operator<<(std::ostream& os, const shaders::ClusterGeometry
   PrefixedLines indent(os.rdbuf(), "  ");
   std::ostream  ios(&indent);
   ios << "ClusterGeometry{\n";
-  rangeSummaryVk<glm::u8vec3>(ios << "triangleVertices ", x.triangleVerticesAddress, x.triangleCount) << "\n";
-  rangeSummaryVk<glm::vec3>(ios << "vertexPositions ", x.vertexPositionsAddress, x.vertexCount) << "\n";
-  rangeSummaryVk<glm::vec3>(ios << "vertexNormals ", x.vertexNormalsAddress, x.vertexCount) << "\n";
+  rangeSummaryVk<glm::u8vec3>(ios << "triangleVertices ",
+                              x.triangleVerticesAddress, x.triangleCount)
+      << "\n";
+  rangeSummaryVk<glm::vec3>(ios << "vertexPositions ", x.vertexPositionsAddress, x.vertexCount)
+      << "\n";
+  rangeSummaryVk<glm::vec3>(ios << "vertexNormals ", x.vertexNormalsAddress, x.vertexCount)
+      << "\n";
   if(x.vertexTexcoordsAddress)
-    rangeSummaryVk<glm::vec2>(ios << "vertexTexcoords ", x.vertexTexcoordsAddress, x.vertexCount) << "\n";
+    rangeSummaryVk<glm::vec2>(ios << "vertexTexcoords ", x.vertexTexcoordsAddress, x.vertexCount)
+        << "\n";
   else
     ios << "vertexTexcoords null\n";
   os << "}";
@@ -299,10 +332,14 @@ inline std::ostream& operator<<(std::ostream& os, const shaders::ClusterGroup& x
   ios << "clusterGeneratingGroupsAddress " << x.clusterGeneratingGroupsAddress << "\n";
   ios << "clasAddressesAddress " << x.clasAddressesAddress << "\n";
   ios << "clusterCount " << x.clusterCount << "\n";
-  rangeSummaryVk<shaders::ClusterGeometry>(ios << "clusterGeometryAddresses ", x.clusterGeometryAddressesAddress, x.clusterCount)
+  rangeSummaryVk<shaders::ClusterGeometry>(ios << "clusterGeometryAddresses ",
+                                           x.clusterGeometryAddressesAddress, x.clusterCount)
       << "\n";
-  rangeSummaryVk<uint32_t>(ios << "clusterGeneratingGroups ", x.clusterGeneratingGroupsAddress, x.clusterCount) << "\n";
-  rangeSummaryVk<uint64_t>(ios << "clasAddresses ", x.clasAddressesAddress, x.clusterCount) << "\n";
+  rangeSummaryVk<uint32_t>(ios << "clusterGeneratingGroups ",
+                           x.clusterGeneratingGroupsAddress, x.clusterCount)
+      << "\n";
+  rangeSummaryVk<uint64_t>(ios << "clasAddresses ", x.clasAddressesAddress, x.clusterCount)
+      << "\n";
   os << "}";
   return os;
 }
@@ -321,7 +358,8 @@ inline std::ostream& operator<<(std::ostream& os, const shaders::Mesh& x)
   ios << "material " << x.material << "\n";
   ios << "groupCount " << x.groupCount << "\n";
   ios << "residentClusterCount " << x.residentClusterCount << "\n";
-  rangeSummaryVk<shaders::ClusterGroup>(ios << "groups ", x.groupsAddress, x.groupCount) << "\n";
+  rangeSummaryVk<shaders::ClusterGroup>(ios << "groups ", x.groupsAddress, x.groupCount)
+      << "\n";
   os << "}";
   return os;
 }

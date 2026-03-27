@@ -72,12 +72,30 @@ public:
   }
 
   // Safer API with callbacks, guaranteeing order of internal calls
-  bool tryProduce(const std::function<void(T&)>& produceCB) { return produce(false, produceCB); }
-  bool waitProduce(const std::function<void(T&)>& produceCB) { return produce(true, produceCB); }
-  bool tryConsume(const std::function<void(T&)>& consumeCB) { return consume(false, consumeCB); }
-  bool waitConsume(const std::function<void(T&)>& consumeCB) { return consume(true, consumeCB); }
-  bool maybeTryConsume(const std::function<bool(T&)>& consumeCB) { return consume(false, consumeCB); }
-  bool maybeWaitConsume(const std::function<bool(T&)>& consumeCB) { return consume(true, consumeCB); }
+  bool tryProduce(const std::function<void(T&)>& produceCB)
+  {
+    return produce(false, produceCB);
+  }
+  bool waitProduce(const std::function<void(T&)>& produceCB)
+  {
+    return produce(true, produceCB);
+  }
+  bool tryConsume(const std::function<void(T&)>& consumeCB)
+  {
+    return consume(false, consumeCB);
+  }
+  bool waitConsume(const std::function<void(T&)>& consumeCB)
+  {
+    return consume(true, consumeCB);
+  }
+  bool maybeTryConsume(const std::function<bool(T&)>& consumeCB)
+  {
+    return consume(false, consumeCB);
+  }
+  bool maybeWaitConsume(const std::function<bool(T&)>& consumeCB)
+  {
+    return consume(true, consumeCB);
+  }
 
   bool produce(bool block, const std::function<void(T&)>& produceCB)
   {
@@ -189,6 +207,19 @@ public:
   // TODO: remove and provide circular iterators
   const std::array<T, N>& storage() const { return m_items; }
 
+  // Trivially drops pending items.
+  // DANGER: does not destroy items
+  // TODO: this whole class really needs to be ensafened for real world use.
+  // reusable objects is risky.
+  void clear()
+  {
+    std::lock_guard lock(m_mutex);
+    m_produceCursor   = 0;
+    m_consumeCursor   = 0;
+    m_size            = 0;
+    m_producePromised = false;
+  }
+
 private:
   // Alternative API. Producer is considered to have promised to call
   // produceDone() if tryToProduce() or waitProduce() returns true in order to
@@ -215,7 +246,6 @@ private:
     ++m_size;
     if(++m_produceCursor == N)
       m_produceCursor = 0;
-    m_cancel          = false;
     m_producePromised = false;
     m_produceCV.notify_one();
   }
@@ -247,15 +277,15 @@ private:
   // A circular buffer of just begin/end pointers cannot differentiate between
   // empty and full. Either an empty element must be maintained or an additional
   // flag/size is needed. This implementation chooses the latter.
-  std::array<T, N>                m_items;
-  size_t                          m_produceCursor   = 0;
-  size_t                          m_consumeCursor   = 0;
-  size_t                          m_size            = 0;
-  bool                            m_producePromised = false;
-  bool                            m_cancel          = false;
-  mutable std::mutex              m_mutex;
+  std::array<T, N>   m_items;
+  size_t             m_produceCursor   = 0;
+  size_t             m_consumeCursor   = 0;
+  size_t             m_size            = 0;
+  bool               m_producePromised = false;
+  bool               m_cancel          = false;
+  mutable std::mutex m_mutex;
   mutable std::condition_variable m_produceCV;  // notified by consumer returning an item for reuse
-  mutable std::condition_variable m_returnCV;   // notified by producer pushing an item to the consumer
+  mutable std::condition_variable m_returnCV;  // notified by producer pushing an item to the consumer
 };
 
 #if 0

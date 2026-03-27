@@ -17,25 +17,19 @@
 
 #pragma once
 
-#include <condition_variable>
+#include <chrono>
 #include <filesystem>
 #include <initializer_list>
-#include <mutex>
-#include <nvh/fileoperations.hpp>
-#include <nvp/nvpfilesystem.hpp>
-#include <nvvk/descriptorsets_vk.hpp>
-#include <nvvkhl/glsl_compiler.hpp>
+#include <optional>
+#include <print>
 #include <sample_vulkan_objects.hpp>
+#include <shaderc/shaderc.hpp>
 #include <stdexcept>
+#include <thread>
+#include <variant>
+#include <vko/bindings.hpp>
+#include <vko/shaderc_compiler.hpp>
 #include <vulkan/vulkan_core.h>
-
-#ifndef PROJECT_NAME
-#error PROJECT_NAME not defined
-#endif
-
-#ifndef NVPRO_CORE_DIR
-#error NVPRO_CORE_DIR not defined
-#endif
 
 // Returns the ceiling of an integer division. Assumes positive values!
 template <std::integral T>
@@ -49,10 +43,11 @@ T div_ceil(const T& a, const T& b)
 class SampleGlslCompiler
 {
 public:
-  SampleGlslCompiler(std::initializer_list<std::string_view> includeDirs)
-      : m_includeDirs{includeDirs.begin(), includeDirs.end()}
+  SampleGlslCompiler(std::initializer_list<std::filesystem::path> includeDirs)
+      : m_includeDirs(includeDirs)
   {
-    m_options.SetIncluder(std::make_unique<nvvkhl::GlslIncluder>(m_includeDirs));
+    m_options.SetIncluder(std::make_unique<vko::shaderc::FileIncluder>(
+        std::span<const std::filesystem::path>(includeDirs)));
     m_options.SetTargetSpirv(shaderc_spirv_version_1_6);
     m_options.SetTargetEnvironment(shaderc_target_env_vulkan, shaderc_env_version_vulkan_1_3);
 #ifndef NDEBUG
@@ -61,80 +56,103 @@ public:
   }
   std::filesystem::path find(const std::filesystem::path& filename)
   {
-    return nvh::findFile(filename.string(), m_includeDirs);
+    for(const auto& dir : m_includeDirs)
+    {
+      auto candidate = dir / filename;
+      if(std::filesystem::exists(candidate))
+        return candidate;
+    }
+    std::println("Failed to find '{}'. Searched:", filename.string());
+    for(const auto& dir : m_includeDirs)
+      std::println(" - {}", dir.string());
+    return {};
   }
-  vkobj::ShaderModule compile(VkDevice                       device,
+
+  template <vko::device_and_commands DeviceAndCommands>
+  vkobj::ShaderModule compile(const DeviceAndCommands&       device,
                               const std::filesystem::path&   path,
                               shaderc_shader_kind            shaderKind,
                               const shaderc::CompileOptions* options = nullptr)
   {
-    std::string source = nvh::loadFile(path.string(), false);
-    if(options == nullptr)
-      options = &defaultOptions();
-    shaderc::SpvCompilationResult binary = m_compiler.CompileGlslToSpv(source, shaderKind, path.string().c_str(), *options);
-    shaderc_compilation_status status = binary.GetCompilationStatus();
-    if(status != shaderc_compilation_status_success)
-    {
-      LOGE("Error: failed to compile %s\n%s\n", path.string().c_str(), binary.GetErrorMessage().c_str());
-      return {};
-    }
+    std::ifstream file(path, std::ios::binary);
+    if(!file)
+      throw std::runtime_error("Failed to open shader source file: " + path.string());
+    std::string source((std::istreambuf_iterator<char>(file)),
+                       std::istreambuf_iterator<char>());
+    vko::shaderc::SpirvBinary binary(m_compiler, source, shaderKind, path.string(),
+                                     "main", options ? *options : m_options);
 
 #if 0
     auto spvFilePath = std::filesystem::path(".") / path.filename().replace_extension(".spv");
     std::ofstream spvFile(spvFilePath, std::ios::binary);
     if(!spvFile.good())
       throw std::runtime_error("Cannot write spv file " + spvFilePath.string());
-    spvFile.write(reinterpret_cast<const char*>(&*binary.begin()), (binary.end() - binary.begin()) * sizeof(*binary.begin()));
+    spvFile.write(reinterpret_cast<const char*>(binary.span().data()), binary.span().size_bytes());
 #endif
 
     VkShaderModuleCreateInfo shaderModuleCreateInfo{
         .sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
         .pNext    = nullptr,
         .flags    = 0,
-        .codeSize = (binary.end() - binary.begin()) * sizeof(uint32_t),
-        .pCode    = reinterpret_cast<const uint32_t*>(binary.begin()),
+        .codeSize = binary.span().size_bytes(),
+        .pCode    = reinterpret_cast<const uint32_t*>(binary.span().data()),
     };
-    return vkobj::ShaderModule(device, shaderModuleCreateInfo);
+    return vko::ShaderModule(device, shaderModuleCreateInfo);
   }
   const shaderc::CompileOptions& defaultOptions() const { return m_options; }
-  shaderc::CompileOptions        m_options;
-  shaderc::Compiler              m_compiler;
-  std::vector<std::string>       m_includeDirs;
+  std::vector<std::filesystem::path> m_includeDirs;
+  shaderc::CompileOptions            m_options;
+  shaderc::Compiler                  m_compiler;
 };
+
+// Simple polling-based file change detector. Returns when the file's last write
+// time changes.
+inline void waitForFileChange(const std::filesystem::path& path)
+{
+  namespace fs       = std::filesystem;
+  auto lastWriteTime = fs::last_write_time(path);
+  while(true)
+  {
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    auto currentWriteTime = fs::last_write_time(path);
+    if(currentWriteTime != lastWriteTime)
+      return;
+  }
+}
 
 // A utility mostly for development. Spins printing error messages and waiting
 // for file changes until the shader compiles.
-inline vkobj::ShaderModule reloadUntilCompiling(VkDevice                       device,
-                                                SampleGlslCompiler&            glslCompiler,
-                                                const std::filesystem::path&   path,
-                                                shaderc_shader_kind            shaderKind,
+template <vko::device_and_commands DeviceAndCommands>
+inline vkobj::ShaderModule reloadUntilCompiling(const DeviceAndCommands& device,
+                                                SampleGlslCompiler& glslCompiler,
+                                                const std::filesystem::path& path,
+                                                shaderc_shader_kind shaderKind,
                                                 const shaderc::CompileOptions* options = nullptr)
 {
-  std::filesystem::path fullPath = glslCompiler.find(path);
-  if(fullPath.empty())
+  std::optional<std::filesystem::path> fullPath = glslCompiler.find(path);
+  if(!fullPath)
     throw std::runtime_error("file not found: " + path.string());
-  vkobj::ShaderModule result = glslCompiler.compile(device, fullPath, shaderKind, options);
-  if((VkShaderModule)result == VK_NULL_HANDLE)
+  for(;;)
   {
-    std::mutex                   m;
-    std::condition_variable      cv;
-    std::string                  parentPath = std::filesystem::absolute(fullPath).parent_path().string();
-    std::vector<std::string>     watchPaths{parentPath};
-    nvp::ModifiedFilesMonitor    fsm(watchPaths, [&]([[maybe_unused]] nvp::FileSystemMonitor::EventData ev) {
-      std::lock_guard<std::mutex> lk(m);
-      result = glslCompiler.compile(device, fullPath, shaderKind, options);
-      cv.notify_one();
-    });
-    std::unique_lock<std::mutex> lk(m);
-    LOGW("Waiting for changes in %s\n", parentPath.c_str());
-    cv.wait(lk, [&] { return (VkShaderModule)result != VK_NULL_HANDLE; });
+    try
+    {
+      return glslCompiler.compile(device, *fullPath, shaderKind, options);
+    }
+    catch(const vko::Exception& e)
+    {
+      std::println("Exception: {}", e.what());
+      std::println("Waiting for changes in {}", fullPath->string());
+      waitForFileChange(*fullPath);
+    }
   }
-  return result;
 }
 
 namespace vkobj {
 
-// Contains single descriptorset instance for a single list of bindings. Bindings must be allocated at construction, i.e. there is no support for first creating layouts. Far from generic, but useful for quick compute shaders and when there is only one binding instance anyway.
+// Simple wrapper around vko::SingleDescriptorSet that can be immediately
+// written to at construction time, similar to the old nvvk API.
+// For more control, use vko::SingleDescriptorSet, vko::BindingsAndFlags, and
+// vko::WriteDescriptorSetBuilder directly.
 class SingleDescriptorSet
 {
 public:
@@ -144,31 +162,76 @@ public:
     VkDescriptorType                                            descriptorType;
     std::variant<VkDescriptorBufferInfo, VkDescriptorImageInfo> descriptorInfo;
   };
-  SingleDescriptorSet(VkDevice device, VkShaderStageFlags stageFlags, std::initializer_list<Binding> bindingInfos)
-      : m_descriptorSet(std::make_unique<nvvk::DescriptorSetContainer>(device))
+
+  template <vko::device_and_commands DeviceAndCommands>
+  SingleDescriptorSet(const DeviceAndCommands&       device,
+                      VkShaderStageFlags             stageFlags,
+                      std::initializer_list<Binding> bindingInfos)
   {
-    VkDescriptorSetLayoutCreateFlags layoutFlags = 0;  // TODO: needed for e.g. VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR
-    for(const Binding& binding : bindingInfos)
-      m_descriptorSet->addBinding(binding.index, binding.descriptorType, 1, stageFlags);
-    m_descriptorSet->initLayout(layoutFlags);
-    m_descriptorSet->initPool(1);
-    std::vector<VkWriteDescriptorSet> writes;
-    writes.reserve(bindingInfos.size());
+    // Build the bindings and flags
+    vko::BindingsAndFlags bindings;
+    bindings.bindings.reserve(bindingInfos.size());
+    bindings.flags.reserve(bindingInfos.size());
+
     for(const Binding& binding : bindingInfos)
     {
-      std::visit([this, &writes,
-                  &binding](const auto& info) { writes.push_back(m_descriptorSet->makeWrite(0, binding.index, &info)); },
-                 binding.descriptorInfo);
+      bindings.bindings.push_back(VkDescriptorSetLayoutBinding{
+          .binding            = binding.index,
+          .descriptorType     = binding.descriptorType,
+          .descriptorCount    = 1,
+          .stageFlags         = stageFlags,
+          .pImmutableSamplers = nullptr,
+      });
+      bindings.flags.push_back(0);  // No special flags
     }
-    vkUpdateDescriptorSets(device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+
+    // Create the descriptor set
+    m_descriptorSet.emplace(device, bindings, 0,
+                            VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT);
+
+    // Write descriptor data immediately
+    vko::WriteDescriptorSetBuilder writes;
+    size_t                         bindingIndex = 0;
+    for(const Binding& binding : bindingInfos)
+    {
+      const auto& layoutBinding = bindings.bindings[bindingIndex];
+
+      if(std::holds_alternative<VkDescriptorBufferInfo>(binding.descriptorInfo))
+      {
+        const auto& info = std::get<VkDescriptorBufferInfo>(binding.descriptorInfo);
+        if(binding.descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER)
+          writes.push_back<VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER>(m_descriptorSet->set,
+                                                              layoutBinding, 0, info);
+        else if(binding.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER)
+          writes.push_back<VK_DESCRIPTOR_TYPE_STORAGE_BUFFER>(m_descriptorSet->set,
+                                                              layoutBinding, 0, info);
+      }
+      else if(std::holds_alternative<VkDescriptorImageInfo>(binding.descriptorInfo))
+      {
+        const auto& info = std::get<VkDescriptorImageInfo>(binding.descriptorInfo);
+        if(binding.descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+          writes.push_back<VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER>(
+              m_descriptorSet->set, layoutBinding, 0, info);
+        else if(binding.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
+          writes.push_back<VK_DESCRIPTOR_TYPE_STORAGE_IMAGE>(m_descriptorSet->set,
+                                                             layoutBinding, 0, info);
+        else if(binding.descriptorType == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE)
+          writes.push_back<VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE>(m_descriptorSet->set,
+                                                             layoutBinding, 0, info);
+      }
+      bindingIndex++;
+    }
+
+    device.vkUpdateDescriptorSets(device, static_cast<uint32_t>(writes.writes().size()),
+                                  writes.writes().data(), 0, nullptr);
   }
 
-  const VkDescriptorSetLayout& layout() const { return m_descriptorSet->getLayout(); }
-  const VkDescriptorSet&       get() const { return *m_descriptorSet->getSets(0); }
+  VkDescriptorSetLayout layout() const { return m_descriptorSet->layout; }
+  operator VkDescriptorSet() const { return m_descriptorSet->set; }
+  const VkDescriptorSet* ptr() const { return m_descriptorSet->set.ptr(); }
 
 private:
-  // unique_ptr to allow object to be moved
-  std::unique_ptr<nvvk::DescriptorSetContainer> m_descriptorSet;
+  std::optional<vko::SingleDescriptorSet> m_descriptorSet;
 };
 
 // Simpler version of nvvk::PushComputeDispatcher, without integrated binding or
@@ -180,121 +243,127 @@ struct SimpleComputePipeline
   SimpleComputePipeline() = default;
 
   // Constructor for only push constants
-  SimpleComputePipeline(VkDevice                       device,
+  template <vko::device_and_commands DeviceAndCommands>
+  SimpleComputePipeline(const DeviceAndCommands&       device,
                         SampleGlslCompiler&            glslCompiler,
                         const std::filesystem::path&   path,
                         const shaderc::CompileOptions* options = nullptr)
     requires(!std::is_void_v<PushConstants>)
+      : pipelineLayout([&]() {
+        VkPushConstantRange pushConstantRange{VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                                              sizeof(PushConstants)};
+        VkPipelineLayoutCreateInfo createInfo = {
+            .sType          = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+            .pNext          = nullptr,
+            .flags          = 0,
+            .setLayoutCount = 0u,
+            .pSetLayouts    = nullptr,
+            .pushConstantRangeCount = 1,
+            .pPushConstantRanges    = &pushConstantRange,
+        };
+        return vkobj::PipelineLayout(device, createInfo);
+      }())
+      , pipeline([&, layout = &pipelineLayout /* WAR C4355 capturing 'this' */]() {
+        auto module = reloadUntilCompiling(device, glslCompiler, path,
+                                           shaderc_glsl_compute_shader, options);
+        VkComputePipelineCreateInfo createInfo = {
+            .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .stage =
+                VkPipelineShaderStageCreateInfo{
+                    .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                    .pNext               = nullptr,
+                    .flags               = 0,
+                    .stage               = VK_SHADER_STAGE_COMPUTE_BIT,
+                    .module              = module,
+                    .pName               = "main",
+                    .pSpecializationInfo = nullptr,
+                },
+            .layout             = *layout,
+            .basePipelineHandle = VK_NULL_HANDLE,
+            .basePipelineIndex  = 0,
+        };
+        return vkobj::ComputePipeline(device, createInfo);
+      }())
   {
-    vkobj::ShaderModule module =
-        reloadUntilCompiling(device, glslCompiler, path, shaderc_shader_kind::shaderc_glsl_compute_shader, options);
-
-    VkPushConstantRange        pushConstantRange{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(PushConstants)};
-    VkPipelineLayoutCreateInfo pipelineLayoutCreateInfo = {
-        .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-        .pNext                  = nullptr,
-        .flags                  = 0,
-        .setLayoutCount         = 0u,
-        .pSetLayouts            = nullptr,
-        .pushConstantRangeCount = 1,
-        .pPushConstantRanges    = &pushConstantRange,
-    };
-    pipelineLayout = vkobj::PipelineLayout(device, pipelineLayoutCreateInfo);
-
-    VkComputePipelineCreateInfo computePipelineCreateInfo = {
-        .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-        .pNext = nullptr,
-        .flags = 0,
-        .stage =
-            VkPipelineShaderStageCreateInfo{
-                .sType               = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-                .pNext               = nullptr,
-                .flags               = 0,
-                .stage               = VK_SHADER_STAGE_COMPUTE_BIT,
-                .module              = module,
-                .pName               = "main",
-                .pSpecializationInfo = nullptr,
-            },
-        .layout             = pipelineLayout,
-        .basePipelineHandle = VK_NULL_HANDLE,
-        .basePipelineIndex  = 0,
-    };
-
-    VkPipeline newPipeline;
-    vkCreateComputePipelines(device, nullptr, 1, &computePipelineCreateInfo, nullptr, &newPipeline);
-    pipeline = vkobj::Pipeline(device, std::move(newPipeline));
   }
 
   // Constructor that includes a descriptor set layout, possibly also with push
   // constants
-  SimpleComputePipeline(VkDevice                       device,
+  template <vko::device_and_commands DeviceAndCommands>
+  SimpleComputePipeline(const DeviceAndCommands&       device,
                         SampleGlslCompiler&            glslCompiler,
                         const std::filesystem::path&   path,
                         VkDescriptorSetLayout          descriptorsetLayout,
                         const shaderc::CompileOptions* options = nullptr)
+      : pipelineLayout([&]() {
+        if constexpr(std::is_void_v<PushConstants>)
+        {
+          VkPipelineLayoutCreateInfo createInfo = {
+              .sType          = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+              .pNext          = nullptr,
+              .flags          = 0,
+              .setLayoutCount = descriptorsetLayout ? 1u : 0u,
+              .pSetLayouts    = &descriptorsetLayout,
+              .pushConstantRangeCount = 0,
+              .pPushConstantRanges    = nullptr,
+          };
+          return vkobj::PipelineLayout(device, createInfo);
+        }
+        else
+        {
+          VkPushConstantRange pushConstantRange{VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                                                sizeof(PushConstants)};
+          VkPipelineLayoutCreateInfo createInfo = {
+              .sType          = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+              .pNext          = nullptr,
+              .flags          = 0,
+              .setLayoutCount = descriptorsetLayout ? 1u : 0u,
+              .pSetLayouts    = &descriptorsetLayout,
+              .pushConstantRangeCount = 1,
+              .pPushConstantRanges    = &pushConstantRange,
+          };
+          return vkobj::PipelineLayout(device, createInfo);
+        }
+      }())
+      , pipeline([&, layout = &pipelineLayout /* WAR C4355 capturing 'this' */]() {
+        auto module = reloadUntilCompiling(device, glslCompiler, path,
+                                           shaderc_glsl_compute_shader, options);
+        VkComputePipelineCreateInfo createInfo = {
+            .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .stage =
+                VkPipelineShaderStageCreateInfo{
+                    .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                    .pNext               = nullptr,
+                    .flags               = 0,
+                    .stage               = VK_SHADER_STAGE_COMPUTE_BIT,
+                    .module              = module,
+                    .pName               = "main",
+                    .pSpecializationInfo = nullptr,
+                },
+            .layout             = *layout,
+            .basePipelineHandle = VK_NULL_HANDLE,
+            .basePipelineIndex  = 0,
+        };
+        return vkobj::ComputePipeline(device, createInfo);
+      }())
   {
-    vkobj::ShaderModule module =
-        reloadUntilCompiling(device, glslCompiler, path, shaderc_shader_kind::shaderc_glsl_compute_shader, options);
-
-    if constexpr(std::is_void_v<PushConstants>)
-    {
-      VkPipelineLayoutCreateInfo pipelineLayoutCreateInfo = {
-          .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-          .pNext                  = nullptr,
-          .flags                  = 0,
-          .setLayoutCount         = descriptorsetLayout ? 1u : 0u,
-          .pSetLayouts            = &descriptorsetLayout,
-          .pushConstantRangeCount = 0,
-          .pPushConstantRanges    = nullptr,
-      };
-      pipelineLayout = vkobj::PipelineLayout(device, pipelineLayoutCreateInfo);
-    }
-    else
-    {
-      VkPushConstantRange        pushConstantRange{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(PushConstants)};
-      VkPipelineLayoutCreateInfo pipelineLayoutCreateInfo = {
-          .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-          .pNext                  = nullptr,
-          .flags                  = 0,
-          .setLayoutCount         = descriptorsetLayout ? 1u : 0u,
-          .pSetLayouts            = &descriptorsetLayout,
-          .pushConstantRangeCount = 1,
-          .pPushConstantRanges    = &pushConstantRange,
-      };
-      pipelineLayout = vkobj::PipelineLayout(device, pipelineLayoutCreateInfo);
-    }
-
-    VkComputePipelineCreateInfo computePipelineCreateInfo = {
-
-        .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-        .pNext = nullptr,
-        .flags = 0,
-        .stage =
-            VkPipelineShaderStageCreateInfo{
-                .sType               = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-                .pNext               = nullptr,
-                .flags               = 0,
-                .stage               = VK_SHADER_STAGE_COMPUTE_BIT,
-                .module              = module,
-                .pName               = "main",
-                .pSpecializationInfo = nullptr,
-            },
-        .layout             = pipelineLayout,
-        .basePipelineHandle = VK_NULL_HANDLE,
-        .basePipelineIndex  = 0,
-    };
-
-    VkPipeline newPipeline;
-    vkCreateComputePipelines(device, nullptr, 1, &computePipelineCreateInfo, nullptr, &newPipeline);
-    pipeline = vkobj::Pipeline(device, std::move(newPipeline));
   }
 
   // Convenience overloads for a const ref to compiler options
-  SimpleComputePipeline(VkDevice device, SampleGlslCompiler& glslCompiler, const std::filesystem::path& path, const shaderc::CompileOptions& options)
+  template <vko::device_and_commands DeviceAndCommands>
+  SimpleComputePipeline(const DeviceAndCommands&       device,
+                        SampleGlslCompiler&            glslCompiler,
+                        const std::filesystem::path&   path,
+                        const shaderc::CompileOptions& options)
       : SimpleComputePipeline(device, glslCompiler, path, &options)
   {
   }
-  SimpleComputePipeline(VkDevice                       device,
+  template <vko::device_and_commands DeviceAndCommands>
+  SimpleComputePipeline(const DeviceAndCommands&       device,
                         SampleGlslCompiler&            glslCompiler,
                         const std::filesystem::path&   path,
                         VkDescriptorSetLayout          descriptorsetLayout,
@@ -304,8 +373,8 @@ struct SimpleComputePipeline
   }
 
   operator VkPipeline() const { return pipeline; }
-  vkobj::PipelineLayout pipelineLayout;
-  vkobj::Pipeline       pipeline;
+  vkobj::PipelineLayout  pipelineLayout;
+  vkobj::ComputePipeline pipeline;
 };
 
 }  // namespace vkobj

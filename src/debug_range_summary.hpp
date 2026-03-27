@@ -23,16 +23,19 @@
 
 #include <glm/glm.hpp>
 #include <glm/gtx/string_cast.hpp>
-#include <nvvk/stagingmemorymanager_vk.hpp>
 #include <ostream>
 #include <sample_vulkan_objects.hpp>
 #include <span>
+#include <vko/allocator.hpp>
+#include <vko/command_recording.hpp>
+#include <vko/staging_memory.hpp>
 #include <vulkan/vulkan_core.h>
 
 namespace numerical_chars {
 inline std::ostream& operator<<(std::ostream& os, char c)
 {
-  return std::is_signed<char>::value ? os << static_cast<int>(c) : os << static_cast<unsigned int>(c);
+  return std::is_signed<char>::value ? os << static_cast<int>(c) :
+                                       os << static_cast<unsigned int>(c);
 }
 
 inline std::ostream& operator<<(std::ostream& os, signed char c)
@@ -107,7 +110,7 @@ public:
       return traits_type::eof();
     }
     if(std::exchange(m_newline, c == '\n'))
-      m_output->sputn(m_prefix.data(), m_prefix.size());
+      m_output->sputn(m_prefix.data(), std::streamsize(m_prefix.size()));
     return m_output->sputc(traits_type::to_char_type(c));
   }
 
@@ -122,18 +125,20 @@ template <class T>
 std::ostream& rangeSummary(std::ostream& os, const T& range, size_t maxItems = 6, bool multiline = false)
 {
   using numerical_chars::operator<<;
-  constexpr bool isString  = std::is_same_v<std::decay_t<decltype(*std::begin(range))>, char>;
-  const char*    separator = multiline ? ",\n  " : (isString ? "" : ", ");
+  constexpr bool isString =
+      std::is_same_v<std::decay_t<decltype(*std::begin(range))>, char>;
+  const char* separator = multiline ? ",\n  " : (isString ? "" : ", ");
 
   // Indent any newlines written during the range
   PrefixedLines indent(os.rdbuf(), "  ");
   std::ostream  ios(multiline ? &indent : os.rdbuf());
 
   // Specialize based on whether the size of the range can be computed
-  if constexpr(std::is_base_of_v<std::random_access_iterator_tag, typename std::iterator_traits<decltype(std::begin(range))>::iterator_category>)
+  if constexpr(std::is_base_of_v<std::random_access_iterator_tag,
+                                 typename std::iterator_traits<decltype(std::begin(range))>::iterator_category>)
   {
     os << "{";
-    size_t size = std::distance(std::begin(range), std::end(range));
+    size_t size = size_t(std::distance(std::begin(range), std::end(range)));
     if(multiline && size > 1)
     {
       ios << "\n";
@@ -158,7 +163,7 @@ std::ostream& rangeSummary(std::ostream& os, const T& range, size_t maxItems = 6
       {
         ios << *it++ << separator;
       }
-      it += std::distance(it, std::end(range)) - maxItems / 2;
+      it += std::distance(it, std::end(range)) - std::intptr_t(maxItems) / 2;
       ios << "...";
       while(it != std::end(range))
       {
@@ -205,120 +210,114 @@ std::ostream& rangeSummary(std::ostream& os, const T& range, size_t maxItems = 6
 class BufferDownloader
 {
 public:
-  BufferDownloader(VkDevice device, uint32_t queueFamilyIndex, nvvk::StagingMemoryManager* stagingMemoryManager)
+  BufferDownloader(const vko::Device& device, uint32_t queueFamilyIndex, vko::vma::Allocator& allocator)
   {
-    assert(s_device == VK_NULL_HANDLE);
-    s_device               = device;
-    s_queueFamilyIndex     = queueFamilyIndex;
-    s_stagingMemoryManager = stagingMemoryManager;
+    assert(s_device == nullptr);
+    s_device           = &device;
+    s_queueFamilyIndex = queueFamilyIndex;
+    s_allocator        = &allocator;
   }
   ~BufferDownloader()
   {
-    s_device               = VK_NULL_HANDLE;
-    s_queueFamilyIndex     = 0;
-    s_stagingMemoryManager = nullptr;
+    s_device           = VK_NULL_HANDLE;
+    s_queueFamilyIndex = 0;
+    s_allocator        = nullptr;
   }
-  template <class T>
-  static const void* download(T bufferOrAddress, size_t bytes)
+  // Download from BufferSpan<T>
+  template <typename T>
+  static std::vector<std::remove_const_t<T>> download(vko::BufferSpan<T> src)
   {
-    assert(s_device != VK_NULL_HANDLE);  // Make sure BufferDownloader() exists in the current scope
-    VkCommandPoolCreateInfo poolCreateInfo = {
-        .sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
-        .pNext            = nullptr,
-        .flags            = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
-        .queueFamilyIndex = s_queueFamilyIndex,
-    };
-    VkCommandPool pool;
-    NVVK_CHECK(vkCreateCommandPool(s_device, &poolCreateInfo, nullptr, &pool));
-    VkQueue queue;
-    vkGetDeviceQueue(s_device, s_queueFamilyIndex, 0, &queue);
-    VkCommandBufferAllocateInfo cmdAllocInfo = {
-        .sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-        .pNext              = nullptr,
-        .commandPool        = pool,
-        .level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-        .commandBufferCount = 1,
-    };
-    VkCommandBuffer cmd;
-    NVVK_CHECK(vkAllocateCommandBuffers(s_device, &cmdAllocInfo, &cmd));
-    VkCommandBufferBeginInfo beginInfo = {
-        .sType            = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-        .pNext            = nullptr,
-        .flags            = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-        .pInheritanceInfo = nullptr,
-    };
-    NVVK_CHECK(vkBeginCommandBuffer(cmd, &beginInfo));
-    VkMemoryBarrier memBarrier = {.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
-                                  .pNext         = nullptr,
-                                  .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT,
-                                  .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT};
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &memBarrier, 0,
-                         nullptr, 0, nullptr);
-    const void* hostCopy;
-    if constexpr(std::is_same_v<T, VkBuffer>)
-      hostCopy = s_stagingMemoryManager->cmdFromBuffer(cmd, bufferOrAddress, 0, bytes);
-    else
-      hostCopy = s_stagingMemoryManager->cmdFromAddressNV(cmd, static_cast<VkDeviceAddress>(bufferOrAddress), bytes);
-    NVVK_CHECK(vkEndCommandBuffer(cmd));
-    VkSubmitInfo submit = {
-        .sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-        .pNext                = nullptr,
-        .waitSemaphoreCount   = 0,
-        .pWaitSemaphores      = nullptr,
-        .pWaitDstStageMask    = nullptr,
-        .commandBufferCount   = 1,
-        .pCommandBuffers      = &cmd,
-        .signalSemaphoreCount = 0,
-        .pSignalSemaphores    = nullptr,
-    };
-    NVVK_CHECK(vkQueueSubmit(queue, 1, &submit, VK_NULL_HANDLE));
-    NVVK_CHECK(vkQueueWaitIdle(queue));
-    vkDestroyCommandPool(s_device, pool, nullptr);
-    return hostCopy;
+    if(src.empty())
+      return {};
+    assert(s_device != VK_NULL_HANDLE);
+
+    vko::TimelineQueue timelineQueue(*s_device, s_queueFamilyIndex, 0);
+    vko::vma::RecyclingStagingPool stagingPool(*s_device, *s_allocator, 3, 5, 1 << 24,
+                                               VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT
+                                                   | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+    vko::StagingStream stream(timelineQueue, std::move(stagingPool));
+
+    vko::cmdMemoryBarrier(*s_device, stream.commandBuffer(),
+                          {VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_WRITE_BIT},
+                          {VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT});
+
+    auto future = vko::download(stream, *s_device, src);
+    stream.submit();
+    return future.get(*s_device);
   }
 
-  template <class T>
-  static std::span<const T> download(const vkobj::Buffer<T>& array)
+  // Download from DeviceSpan<T>
+  template <typename T>
+  static std::vector<T> download(vko::DeviceSpan<const T> src)
   {
-    return std::span(reinterpret_cast<const T*>(download(static_cast<VkBuffer>(array), array.size() * sizeof(T))), array.size());
-  }
+    if(src.empty())
+      return {};
+    assert(s_device != VK_NULL_HANDLE);
 
-  template <class T>
-  static std::span<const T> download(vkobj::DeviceAddress<T> address, size_t elementCount)
-  {
-    return std::span(reinterpret_cast<const T*>(download(static_cast<VkDeviceAddress>(address), elementCount * sizeof(T))), elementCount);
+    vko::TimelineQueue timelineQueue(*s_device, s_queueFamilyIndex, 0);
+    vko::vma::RecyclingStagingPool stagingPool(*s_device, *s_allocator, 3, 5, 1 << 24,
+                                               VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT
+                                                   | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+    vko::StagingStream stream(timelineQueue, std::move(stagingPool));
+
+    vko::cmdMemoryBarrier(*s_device, stream.commandBuffer(),
+                          {VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_WRITE_BIT},
+                          {VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT});
+
+    auto future = vko::download(stream, *s_device, src);
+    stream.submit();
+    return future.get(*s_device);
   }
 
 private:
-  static inline thread_local VkDevice                    s_device               = VK_NULL_HANDLE;
-  static inline thread_local uint32_t                    s_queueFamilyIndex     = 0;
-  static inline thread_local nvvk::StagingMemoryManager* s_stagingMemoryManager = nullptr;
+  static inline thread_local const vko::Device*   s_device           = nullptr;
+  static inline thread_local uint32_t             s_queueFamilyIndex = 0;
+  static inline thread_local vko::vma::Allocator* s_allocator        = nullptr;
 };
 
 template <class T>
-std::ostream& rangeSummaryVk(std::ostream& os, VkBuffer buffer, size_t elementCount, size_t maxItems = 6, bool multiline = false)
+std::ostream& rangeSummaryVk(std::ostream& os,
+                             VkBuffer      buffer,
+                             size_t        elementCount,
+                             size_t        maxItems  = 6,
+                             bool          multiline = false)
 {
-  std::span hostArray(reinterpret_cast<const T*>(BufferDownloader::download(buffer, elementCount * sizeof(T))), elementCount);
+  vko::BufferSpan<const T> span(vko::BufferAddress<const T>(buffer, 0), elementCount);
+  auto hostArray = BufferDownloader::download(span);
   return rangeSummary(os, hostArray, maxItems, multiline);
 }
 
 template <class T>
-std::ostream& rangeSummaryVk(std::ostream& os, const vkobj::Buffer<T>& array, size_t maxItems = 6, bool multiline = false)
+std::ostream& rangeSummaryVk(std::ostream&           os,
+                             const vkobj::Buffer<T>& array,
+                             size_t                  maxItems  = 6,
+                             bool                    multiline = false)
 {
-  std::span<const T> hostArray = BufferDownloader::download(array);
-  VkDeviceAddress    address   = array.address().address;
+  auto hostArray          = BufferDownloader::download(vko::BufferSpan(array));
+  VkDeviceAddress address = array.address();
   return rangeSummary(os << reinterpret_cast<void*>(address), hostArray, maxItems, multiline);
 }
 
 template <class T>
-std::ostream& rangeSummaryVk(std::ostream& os, vkobj::DeviceAddress<T> address, size_t elementCount, size_t maxItems = 6, bool multiline = false)
+std::ostream& rangeSummaryVk(std::ostream&           os,
+                             vkobj::DeviceAddress<T> address,
+                             size_t                  elementCount,
+                             size_t                  maxItems  = 6,
+                             bool                    multiline = false)
 {
-  std::span<const T> hostArray = BufferDownloader::download(address, elementCount);
-  return rangeSummary(os << reinterpret_cast<void*>(address.address), hostArray, maxItems, multiline);
+  vko::DeviceSpan<const T> span(vko::DeviceAddress<const T>(address.address), elementCount);
+  auto hostArray = BufferDownloader::download(span);
+  return rangeSummary(os << reinterpret_cast<void*>(address.address), hostArray,
+                      maxItems, multiline);
 }
 
 template <class T>
-std::ostream& rangeSummaryVk(std::ostream& os, VkDeviceAddress address, size_t elementCount, size_t maxItems = 6, bool multiline = false)
+std::ostream& rangeSummaryVk(std::ostream&   os,
+                             VkDeviceAddress address,
+                             size_t          elementCount,
+                             size_t          maxItems  = 6,
+                             bool            multiline = false)
 {
-  return rangeSummaryVk(os << reinterpret_cast<void*>(address), vkobj::DeviceAddress<T>(address), elementCount, maxItems, multiline);
+  return rangeSummaryVk(os << reinterpret_cast<void*>(address),
+                        vkobj::DeviceAddress<T>(address), elementCount, maxItems, multiline);
 }

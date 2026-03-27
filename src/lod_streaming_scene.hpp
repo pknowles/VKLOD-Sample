@@ -25,9 +25,10 @@
 #include <sample_allocation.hpp>
 #include <sample_garbage.hpp>
 #include <sample_glsl_compiler.hpp>
+#include <sample_profiler.hpp>
 #include <sample_vulkan_objects.hpp>
-#include <shaders/shaders_scene.h>
-#include <shaders/shaders_stream.h>
+#include <shaders_scene.h>
+#include <shaders_stream.h>
 #include <thread>
 
 namespace streaming {
@@ -36,8 +37,8 @@ namespace streaming {
 // object is built over time and its allocations are reused.
 struct LoadUnloadBatch
 {
-  LoadUnloadBatch(ResourceAllocator* allocator, uint32_t maxLoadUnloads)
-      : groupModsList(allocator, maxLoadUnloads)
+  LoadUnloadBatch(const vko::Device& device, vko::vma::Allocator& allocator, uint32_t maxLoadUnloads)
+      : groupModsList(device, allocator, maxLoadUnloads)
   {
   }
   size_t memoryUsage() const { return groupModsList.memoryUsage(); }
@@ -74,17 +75,23 @@ struct LoadUnloadBatch
 // final insertion into the scene's geometry pointers
 struct BatchWithBuiltCLAS
 {
-  BatchWithBuiltCLAS(ResourceAllocator* allocator,
-                     const Scene&       scene,
-                     uint32_t           maxLoadUnloads,
-                     uint32_t           maxGroupsPerBuild,
-                     uint32_t           maxClustersPerBuild,
-                     uint32_t           positionTruncateBits);
-  size_t                  memoryUsage() const { return batch.memoryUsage() + clasStaging.memoryUsage(); }
-  LoadUnloadBatch         batch;
-  vkobj::SemaphoreValue   clasBuildDone;
-  ClasStaging             clasStaging;
-  std::vector<PoolMemory> newClases;
+  BatchWithBuiltCLAS(const vko::Instance& instance,
+                     const vko::Device&   device,
+                     vko::vma::Allocator& allocator,
+                     VkPhysicalDevice     physicalDevice,
+                     const Scene&         scene,
+                     uint32_t             maxLoadUnloads,
+                     uint32_t             maxGroupsPerBuild,
+                     uint32_t             maxClustersPerBuild,
+                     uint32_t             positionTruncateBits);
+  size_t memoryUsage() const
+  {
+    return batch.memoryUsage() + clasStaging.memoryUsage();
+  }
+  LoadUnloadBatch                      batch;
+  std::optional<vkobj::SemaphoreValue> clasBuildDone;
+  ClasStaging                          clasStaging;
+  std::vector<PoolMemory>              newClases;
 };
 
 // Streaming involves processing requests from the GPU in various queues.
@@ -119,7 +126,9 @@ public:
   {
     // Wait for either a result or work to run try (no more work and no results)
     std::unique_lock lk(mutex);
-    cv.wait(lk, [this] { return m_resultCount != 0 || (m_requestWork == 0 && m_resultCount == 0); });
+    cv.wait(lk, [this] {
+      return m_resultCount != 0 || (m_requestWork == 0 && m_resultCount == 0);
+    });
     return m_resultCount > 0;
   }
 
@@ -155,70 +164,88 @@ public:
   static constexpr uint32_t MaxGroupsPerBuild    = 512;
 #endif
 
-  StreamingSceneVk(ResourceAllocator*    allocator,
-                   SampleGlslCompiler&   glslCompiler,
-                   VkDeviceSize          geometryBufferBytes,  // Streaming limit in bytes
-                   uint32_t              maxResidentGroups,    // Streaming limit in cluster groups
+  StreamingSceneVk(const vko::Instance& instance,
+                   const vko::Device&   device,
+                   vko::vma::Allocator& allocator,
+                   vkobj::Staging&      staging,
+                   VkPhysicalDevice     physicalDevice,
+                   VkQueue              queue,
+                   SampleGlslCompiler&  glslCompiler,
+                   VkDeviceSize geometryBufferBytes,  // Streaming limit in bytes
+                   uint32_t maxResidentGroups,  // Streaming limit in cluster groups
                    VkCommandPool         initPool,
                    vkobj::TimelineQueue& initQueue,
                    const Scene&          scene,
                    SceneVK&              sceneVk,
                    bool                  greedyUnload,
                    bool                  requiresClas,
-                   uint32_t              streamingTransferQueueFamilyIndex,
-                   VkQueue               streamingTransferQueue);
+                   vkobj::TimelineQueue& streamingTransferQueue,
+                   SampleProfiler&       profiler);
 
   ~StreamingSceneVk();
 
   // Called on the render thread
-  void makeRequests(vkobj::Buffer<uint8_t>& groupNeededFlags, vkobj::SemaphoreValue promisedSubmitSemaphoreState, VkCommandBuffer cmd);
+  void makeRequests(const vko::Device&      device,
+                    vkobj::Buffer<uint8_t>& groupNeededFlags,
+                    vkobj::SemaphoreValue   promisedSubmitSemaphoreState,
+                    VkCommandBuffer         cmd);
 
   // Called on the render thread. Do not pass block=true unless
   // m_workCounter.waitForResult() returns true.
-  void buildClasBatch(ResourceAllocator* allocator, vkobj::SemaphoreValue promisedSubmitSemaphoreState, bool block, VkCommandBuffer cmd);
+  void buildClasBatch(const vko::Device& device, vkobj::Staging& staging, bool block);
 
   // Called on the render thread. Returns true if there were any groups
   // modifications made. Do not pass block=true unless
   // m_workCounter.waitForResult() returns true.
-  bool modifyGroups(ResourceAllocator*            allocator,
+  bool modifyGroups(const vko::Device&            device,
+                    vkobj::Staging&               staging,
                     const Scene&                  scene,
                     vkobj::Buffer<shaders::Mesh>& meshPointers,
-                    std::queue<Garbage>&          unloadGarbage,
-                    vkobj::SemaphoreValue         unloadGarbageSemaphore,
                     bool                          block,
-                    VkCommandBuffer               cmd,
-                    uint64_t&                     totalResidentClusters,  // TODO: clean up too many params
-                    uint64_t&                     totalResidentInstanceClusters);
+                    uint64_t& totalResidentClusters,  // TODO: clean up too many params
+                    uint64_t& totalResidentInstanceClusters);
 
   const PoolAllocator& pool() const { return m_memoryPool; }
   uint32_t             pendingRequests() const { return m_pendingRequests; }
   uint32_t             residentGroups() const { return m_residentGroupsStat; }
-  size_t               stagingMemoryUsage() const { return m_geometryLoaderMemory + m_staticStagingMemory; }
-  bool                 requiresClas() const { return m_requiresClas; }
+  size_t               stagingMemoryUsage() const
+  {
+    return m_geometryLoaderMemory + m_staticStagingMemory;
+  }
+  bool requiresClas() const { return m_requiresClas; }
 
   // Synchronously fulfill all streaming requests. Called on the render thread
-  void flush(ResourceAllocator*            allocator,
+  void flush(vkobj::Staging&               staging,
+             const vko::Device&            device,
              VkCommandPool                 pool,
              vkobj::TimelineQueue&         queue,
              const Scene&                  scene,
              vkobj::Buffer<uint8_t>&       groupNeededFlags,
              vkobj::Buffer<shaders::Mesh>& meshPointers,
-             uint64_t&                     totalResidentClusters,  // TODO: clean up too many params
-             uint64_t&                     totalResidentInstanceClusters);
+             uint64_t& totalResidentClusters,  // TODO: clean up too many params
+             uint64_t& totalResidentInstanceClusters);
 
-  bool setGreedyUnload(bool greedyUnload) { return m_greedyUnload.exchange(greedyUnload); }
+  bool setGreedyUnload(bool greedyUnload)
+  {
+    return m_greedyUnload.exchange(greedyUnload);
+  }
+
+  // Default is not safe due to member dependency order
+  StreamingSceneVk operator=(StreamingSceneVk&& other) = delete;
 
 private:
   void geometryLoaderEntrypoint(std::unique_ptr<const Scene> scene);  // pointer to war coverity large pass-by-value warning
-  void loadGeometryBatch(const Scene& scene, streaming::RequestDependencyPipeline& requests, LoadUnloadBatch& batch);
+  void loadGeometryBatch(const Scene&                          scene,
+                         streaming::RequestDependencyPipeline& requests,
+                         LoadUnloadBatch&                      batch);
   void loadUnloadGroupAllocations(const Scene&                 scene,
                                   LoadUnloadBatch&             batch,
                                   std::vector<PoolMemory>&     newClases,
                                   std::vector<ClusterGroupVk>& unloadGarbage);
 
-  vkobj::Context    m_geometryLoaderContext;
-  const uint32_t    m_maxClustersPerBuild;
-  bool              m_requiresClas = false;  // HACK: skip building CLAS for rasterization
+  vkobj::Context m_geometryLoaderContext;
+  const uint32_t m_maxClustersPerBuild;
+  bool m_requiresClas = false;  // HACK: skip building CLAS for rasterization
   vkobj::ByteBuffer m_memoryPoolBuffer;
   PoolAllocator     m_memoryPool;
 
@@ -256,15 +283,17 @@ private:
   streaming::ModifyGroupsProgram               m_modifyGroupsProgram;
   streaming::FillClasInputProgram              m_fillClasInputProgram;
   streaming::PackClasProgram                   m_packClasProgram;
-  uint32_t                                     m_residentGroups       = 0;  // owned by m_geometryLoaderThread
-  uint32_t                                     m_maxResidentGroups    = 0;
-  std::atomic<bool>                            m_greedyUnload         = false;
-  std::atomic<bool>                            m_running              = true;
-  std::atomic<uint32_t>                        m_pendingRequests      = 0;
-  std::atomic<size_t>                          m_geometryLoaderMemory = 0;
-  std::atomic<uint32_t>                        m_residentGroupsStat   = 0;  // readable by render thread
-  size_t                                       m_staticStagingMemory  = 0;
-  std::jthread                                 m_geometryLoaderThread;
+  uint32_t          m_residentGroups    = 0;  // owned by m_geometryLoaderThread
+  uint32_t          m_maxResidentGroups = 0;
+  std::atomic<bool> m_greedyUnload      = false;
+  std::atomic<bool> m_running           = true;
+  std::atomic<uint32_t> m_pendingRequests      = 0;
+  std::atomic<size_t>   m_geometryLoaderMemory = 0;
+  std::atomic<uint32_t> m_residentGroupsStat  = 0;  // readable by render thread
+  size_t                m_staticStagingMemory = 0;
+  std::jthread          m_geometryLoaderThread;
+  std::reference_wrapper<SampleProfiler> m_profiler;
+  std::queue<Garbage>                    m_renderThreadGarbage;
 };
 
 }  // namespace streaming

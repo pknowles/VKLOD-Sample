@@ -35,7 +35,8 @@ struct AABB
   // Initialize with inverse bounds to allow subsequent unions with '+'
   static constexpr AABB make_empty() noexcept
   {
-    return {glm::vec3(std::numeric_limits<float>::max()), glm::vec3(std::numeric_limits<float>::lowest())};
+    return {glm::vec3(std::numeric_limits<float>::max()),
+            glm::vec3(std::numeric_limits<float>::lowest())};
   }
 
   // Plus returns the union of bounding boxes.
@@ -45,13 +46,25 @@ struct AABB
   {
     return {glm::min(min, other.min), glm::max(max, other.max)};
   }
-  constexpr AABB& operator+=(const AABB& other) noexcept { return *this = *this + other; };
+  constexpr AABB& operator+=(const AABB& other) noexcept
+  {
+    return *this = *this + other;
+  };
 
   [[nodiscard]] constexpr glm::vec3 size() const noexcept { return max - min; }
-  [[nodiscard]] constexpr glm::vec3 center() const noexcept { return (min + max) * 0.5f; }
-  [[nodiscard]] constexpr glm::vec3 positive_size() const noexcept { return glm::max(glm::vec3(0.0f), size()); }
-  [[nodiscard]] constexpr AABB      positive() const noexcept { return {min, min + positive_size()}; }
-  [[nodiscard]] constexpr float     half_area() const noexcept
+  [[nodiscard]] constexpr glm::vec3 center() const noexcept
+  {
+    return (min + max) * 0.5f;
+  }
+  [[nodiscard]] constexpr glm::vec3 positive_size() const noexcept
+  {
+    return glm::max(glm::vec3(0.0f), size());
+  }
+  [[nodiscard]] constexpr AABB positive() const noexcept
+  {
+    return {min, min + positive_size()};
+  }
+  [[nodiscard]] constexpr float half_area() const noexcept
   {
     auto s = size();
     return s.x * (s.y + s.z) + s.y * s.z;

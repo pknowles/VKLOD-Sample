@@ -38,29 +38,67 @@
 #     If multiple versions of NGX are pulled, first one wins.
 
 #-------------------------------------------------------------------------------
-# Download the DLSS SDK.
-if(NOT DLSS_VERSION)
-  set(DLSS_VERSION "310.4.0" CACHE STRING "DLSS version to download.")
-endif()
+# Download the DLSS SDK using standard CMake functions.
+set(DLSS_VERSION "310.4.0" CACHE STRING "DLSS version to download from https://github.com/NVIDIA/DLSS")
 set(_DLSS_URL "https://github.com/NVIDIA/DLSS/archive/refs/tags/v${DLSS_VERSION}.zip")
-include(DownloadPackage)
-download_package(
-  NAME DLSSRR
-  URLS ${_DLSS_URL}
-  VERSION ${DLSS_VERSION}
-  LOCATION DLSS_SOURCE_DIR
-)
+set(_DLSS_TARGET_DIR "${CMAKE_BINARY_DIR}/_deps/DLSSRR-${DLSS_VERSION}")
+set(_DLSS_ZIP_FILE "${_DLSS_TARGET_DIR}/DLSS-${DLSS_VERSION}.zip")
+set(_DLSS_EXPECTED_ROOT "${_DLSS_TARGET_DIR}/DLSS-${DLSS_VERSION}")
 
-set(DLSS_ROOT ${DLSS_SOURCE_DIR}/DLSS-${DLSS_VERSION})
-message(STATUS "--> using DLSS-RR under: ${DLSS_ROOT}")
-
-# Collect DLSS DLLs that need to be copied.
-if (WIN32)
-  file(GLOB _DLSS_DLLS_DEV "${DLSS_ROOT}/lib/Windows_x86_64/dev/nvngx_*.dll")
-  file(GLOB _DLSS_DLLS_REL "${DLSS_ROOT}/lib/Windows_x86_64/rel/nvngx_*.dll")
+# Check if we already have the package downloaded and extracted
+# Use absolute path to avoid any resolution issues
+set(_DLSS_INCLUDE_CHECK "${_DLSS_EXPECTED_ROOT}/include")
+if(EXISTS "${_DLSS_INCLUDE_CHECK}")
+  message(STATUS "Found existing DLSS-RR (v${DLSS_VERSION}) at '${_DLSS_EXPECTED_ROOT}'")
 else()
-  file(GLOB _DLSS_DLLS_DEV "${DLSS_ROOT}/lib/Linux_x86_64/dev/libnvidia-ngx-*.so.*")
-  file(GLOB _DLSS_DLLS_REL "${DLSS_ROOT}/lib/Linux_x86_64/rel/libnvidia-ngx-*.so.*")
+  # Path doesn't exist - need to download
+  if(NOT EXISTS "${_DLSS_ZIP_FILE}")
+    message(STATUS "Downloading DLSS-RR (v${DLSS_VERSION}) from ${_DLSS_URL}")
+    file(DOWNLOAD ${_DLSS_URL} "${_DLSS_ZIP_FILE}"
+         SHOW_PROGRESS
+         STATUS _DOWNLOAD_STATUS)
+    list(GET _DOWNLOAD_STATUS 0 _DOWNLOAD_STATUS_CODE)
+    list(GET _DOWNLOAD_STATUS 1 _DOWNLOAD_STATUS_MESSAGE)
+    if(NOT _DOWNLOAD_STATUS_CODE EQUAL 0)
+      file(REMOVE "${_DLSS_ZIP_FILE}")
+      message(FATAL_ERROR "Failed to download DLSS: ${_DOWNLOAD_STATUS_MESSAGE}")
+    endif()
+  endif()
+  
+  # Extract the zip file
+  message(STATUS "Extracting DLSS-RR (v${DLSS_VERSION}) from ${_DLSS_ZIP_FILE}")
+  file(ARCHIVE_EXTRACT
+       INPUT "${_DLSS_ZIP_FILE}"
+       DESTINATION "${_DLSS_TARGET_DIR}")
+
+  message(STATUS "Using downloaded DLSS-RR (v${DLSS_VERSION}) at '${_DLSS_EXPECTED_ROOT}'")
+endif()
+
+set(DLSS_ROOT "${_DLSS_EXPECTED_ROOT}")
+set(DLSS_SOURCE_DIR "${_DLSS_TARGET_DIR}")
+
+if (WIN32)
+  set(_DLSS_OS "Windows")
+  set(_DLSS_BIN_WILDCARD "nvngx_*.dll")
+else()
+  set(_DLSS_OS "Linux")
+  set(_DLSS_BIN_WILDCARD "libnvidia-ngx-*.so.*")
+endif()
+
+if(ARCH_PROC MATCHES "^(arm|aarch64)")
+  set(_DLSS_ARCH "aarch64")
+else()
+  set(_DLSS_ARCH "x86_64")
+endif()
+
+file(GLOB _DLSS_DLLS_DEV "${DLSS_ROOT}/lib/${_DLSS_OS}_${_DLSS_ARCH}/dev/${_DLSS_BIN_WILDCARD}")
+file(GLOB _DLSS_DLLS_REL "${DLSS_ROOT}/lib/${_DLSS_OS}_${_DLSS_ARCH}/rel/${_DLSS_BIN_WILDCARD}")
+
+if(NOT _DLSS_DLLS_DEV)
+  message(WARNING "DLSS dev binary not found at ${DLSS_ROOT}/lib/${_DLSS_OS}_${_DLSS_ARCH}/dev/${_DLSS_BIN_WILDCARD}")
+endif()
+if(NOT _DLSS_DLLS_REL)
+  message(WARNING "DLSS dev binary not found at ${DLSS_ROOT}/lib/${_DLSS_OS}_${_DLSS_ARCH}/rel/${_DLSS_BIN_WILDCARD}")
 endif()
 
 option(DLSS_USE_DEVELOP_LIBRARIES "Use non-distributable DLSS libraries with a debug overlay. On Windows, press Ctrl-Alt-F12 to enable the debug overlay and Ctrl-Alt-F11 to switch views." OFF)
