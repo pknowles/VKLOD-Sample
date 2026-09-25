@@ -17,6 +17,7 @@
 
 #pragma once
 
+#include <nvtx3/nvtx3.hpp>
 #include <sample_allocation.hpp>
 #include <utility>
 #include <vko/allocator.hpp>
@@ -355,47 +356,6 @@ struct Context
   vkobj::Staging                              staging;
 };
 
-// Scoped push/pop wrapper for NVTX range markers
-class NvtxRange
-{
-public:
-  [[nodiscard]] explicit NvtxRange([[maybe_unused]] const char* name)
-  {
-#ifdef NVTX3
-    nvtxRangePush(name);
-#else
-    (void)name;
-#endif
-  }
-
-  [[nodiscard]] explicit NvtxRange([[maybe_unused]] const char* name,
-                                   [[maybe_unused]] uint32_t    color)
-  {
-#ifdef NVTX3
-    nvtxRangePushEx(nvtxRangeStartEx(
-        &(nvtxEventAttributes_t){.version       = NVTX_VERSION,
-                                 .size          = NVTX_EVENT_ATTRIB_STRUCT_SIZE,
-                                 .colorType     = NVTX_COLOR_ARGB,
-                                 .color         = color,
-                                 .messageType   = NVTX_MESSAGE_TYPE_ASCII,
-                                 .message.ascii = name}));
-#else
-    (void)name;
-    (void)color;
-#endif
-  }
-
-  ~NvtxRange()
-  {
-#ifdef NVTX3
-    nvtxRangePop();
-#endif
-  }
-
-  NvtxRange(const NvtxRange&)            = delete;
-  NvtxRange& operator=(const NvtxRange&) = delete;
-};
-
 // Scoped wrapper for Vulkan debug utils labels
 template <class CommandBuffer = vko::CyclingCommandBuffer<>>
 class ScopedDebugLabel
@@ -433,7 +393,7 @@ private:
   CommandBuffer&                   m_cmd;
   PFN_vkCmdBeginDebugUtilsLabelEXT m_vkCmdBeginDebugUtilsLabelEXT = nullptr;
   PFN_vkCmdEndDebugUtilsLabelEXT   m_vkCmdEndDebugUtilsLabelEXT   = nullptr;
-  NvtxRange                        m_nvtxRange;
+  nvtx3::scoped_range              m_nvtxRange;
 };
 
 }  // namespace vkobj

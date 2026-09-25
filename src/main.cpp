@@ -870,7 +870,7 @@ public:
       // before freeing streaming memory pool allocations, calling the
       // streaming::ClusterGroupVk destructor
       {
-        vkobj::NvtxRange garbageRange("Free Garbage");
+        nvtx3::scoped_range garbageRange{"Free Garbage"};
         ScopedCpuTimer   timer(m_profiler, "Free Garbage");
         emptyUnusedGarbage(m_garbage, m_context.device.get());
       }
@@ -879,7 +879,7 @@ public:
       if(m_sceneFuture.valid()
          && m_sceneFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
       {
-        vkobj::NvtxRange sceneSwapRange("Scene Swap");
+        nvtx3::scoped_range sceneSwapRange{"Scene Swap"};
         // The RenderableScene is created on the main thread because the streaming
         // object always uses the same transfer queue in the background, which is
         // not yet synchronized. For the same reason we must stop the streaming
@@ -995,7 +995,7 @@ public:
       // per-instance LODs. If the renderer is a raytracer, acceleration
       // structures are built during this process.
       {
-        vkobj::NvtxRange sceneRenderRange("Scene Render");
+        nvtx3::scoped_range sceneRenderRange{"Scene Render"};
         m_rendererCommon.cmdUpdateParams(m_context.device.get(), *m_framebuffer, m_camera,
                                          m_scene.view.maxWorldDiagonalInObjectSpace, cmd);
 
@@ -1010,7 +1010,7 @@ public:
       }
 
       {
-        vkobj::NvtxRange tonemapRange("Tonemap");
+        nvtx3::scoped_range tonemapRange{"Tonemap"};
         m_framebuffer->cmdTonemap(cmd);
       }
 
@@ -1018,7 +1018,7 @@ public:
       // streaming thread. Results will be picked up next frame or when next
       // available.
       {
-        vkobj::NvtxRange makeRequestsRange("Make Requests");
+        nvtx3::scoped_range makeRequestsRange{"Make Requests"};
         ScopedGpuTimer timer(m_context.device.get(), m_profiler, cmd, "Make Requests");
         streaming.makeRequests(m_context.device.get(), m_scene.vk.allGroupNeededFlags,
                                m_context.staging.commandBuffer().nextSubmitSemaphore(), cmd);

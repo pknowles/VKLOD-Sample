@@ -268,7 +268,7 @@ bool StreamingSceneVk::modifyGroups(const vko::Device&            device,
     // Keep track of streamed allocations until we unload them and move any
     // unloaded allocations into m_renderThreadGarbage.
     {
-      vkobj::NvtxRange loadUnloadRange("Load/Unload Group Allocations");
+      nvtx3::scoped_range loadUnloadRange{"Load/Unload Group Allocations"};
       std::vector<streaming::ClusterGroupVk> garbageBatch;
       loadUnloadGroupAllocations(scene, in.batch, in.newClases, garbageBatch);
       if(!garbageBatch.empty())
@@ -445,7 +445,7 @@ void StreamingSceneVk::loadGeometryBatch(const Scene& scene,
                                          streaming::RequestDependencyPipeline& requests,
                                          LoadUnloadBatch& batch)
 {
-  vkobj::NvtxRange nvtxRange("loadGeometryBatch()");
+  nvtx3::scoped_range nvtxRange{"loadGeometryBatch()"};
 
   // Callback to load a cluster group. A callback is easier as we can abort the
   // batch at any time, e.g. when the batch is full or when out of memory.

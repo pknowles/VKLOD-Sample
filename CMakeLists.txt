@@ -205,12 +205,6 @@ set(ARGS_BUILD_EXAMPLE OFF CACHE BOOL "" FORCE)
 set(ARGS_BUILD_UNITTESTS OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(args)
 
-# Find NVToolsExt for profiling
-find_package(NVToolsExt QUIET)
-if(NVToolsExt_FOUND)
-  add_definitions(-DNVP_SUPPORTS_NVTOOLSEXT)
-endif()
-
 # Download the bunny as the default mesh to load (optional)
 set(DOWNLOAD_TARGET_DIR "${CMAKE_BINARY_DIR}/downloaded_resources")
 if(NOT EXISTS "${DOWNLOAD_TARGET_DIR}/bunny_v2.zip")
@@ -525,7 +519,7 @@ if(NOT EXISTS "${DEBUGBREAK_HEADER}")
     )
 endif()
 
-target_include_directories(${SAMPLE_EXECUTABLE} PRIVATE src shaders nvpro_core_legacy nvpro_core_legacy/nvtx3 ${DEBUGBREAK_DIR})
+target_include_directories(${SAMPLE_EXECUTABLE} PRIVATE src shaders nvpro_core_legacy ${DEBUGBREAK_DIR})
 
 target_link_libraries(${SAMPLE_EXECUTABLE}
   vulkan_objects
@@ -557,6 +551,16 @@ target_compile_definitions(${SAMPLE_EXECUTABLE} PRIVATE
   GLM_FORCE_CTOR_INIT  # safety
   GLM_ENABLE_EXPERIMENTAL
   )
+
+# NVTX profiling markers
+FetchContent_Declare(
+  nvtx
+  GIT_REPOSITORY https://github.com/NVIDIA/NVTX.git
+  GIT_TAG v3.6.0-c-cpp  # lightweight branch containing only the C/C++ headers
+  GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(nvtx)
+target_link_libraries(${SAMPLE_EXECUTABLE} nvtx3-cpp)  # adds nvtx3/ include path
 
 # Install for packaging
 # TODO: use cpack to combine code with the AppImage path

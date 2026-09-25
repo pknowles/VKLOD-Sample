@@ -17,7 +17,6 @@
 
 #include "vko/device_address.hpp"
 #include <acceleration_structures.hpp>
-#include <nvh/nsightevents.h>
 #include <sample_allocation.hpp>
 #include <sample_vulkan_objects.hpp>
 #include <stdexcept>
@@ -483,7 +482,7 @@ void ClasStaging::buildClas(vkobj::Staging&    staging,
                             std::span<const uint32_t> loadGroupClusterOffsetsHost,
                             uint32_t totalClusters)
 {
-  vkobj::NvtxRange buildClasRange("ClasStaging::buildClas");
+  nvtx3::scoped_range buildClasRange{"ClasStaging::buildClas"};
   assert(loadClusterLoadGroupsHost.size() <= maxClustersPerBuild());
   assert(m_groupTotalClasSizesHost.size() == 0);
   uint32_t newGroupCount = uploadedMods.loadGroupCount;
@@ -599,7 +598,7 @@ void ClasStaging::compactClas(vkobj::Staging&              staging,
                               uint32_t                     totalClusters,
                               std::vector<PoolMemory>&     newClases)
 {
-  vkobj::NvtxRange compactClasRange("ClasStaging::compactClas");
+  nvtx3::scoped_range compactClasRange{"ClasStaging::compactClas"};
   // Make sure buildClas() has completed before reading
   // clasSizes.groupTotalClasSizesHost
   readySemaphoreState.wait(device);

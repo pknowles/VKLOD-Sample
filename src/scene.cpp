@@ -517,7 +517,7 @@ ClusterGroupGeometryVk::ClusterGroupGeometryVk(const vko::Device& device,
                                                const ClusteredMesh& mesh,
                                                uint32_t             groupIndex)
 {
-  vkobj::NvtxRange nvtxRange("ClusterGroupGeometryVk()");
+  nvtx3::scoped_range nvtxRange{"ClusterGroupGeometryVk()"};
 
   nvcluster_Range clusterRange = mesh.groupClusterRanges[groupIndex];
 
