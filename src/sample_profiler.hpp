@@ -238,9 +238,10 @@ public:
 
   struct TaggedSamples : DurationSamples
   {
-    std::vector<GpuMeasurement> pendingGpuSamples;
-    bool isGPU = false;
-    bool inactive = false;
+    std::vector<GpuMeasurement>           pendingGpuSamples;
+    bool                                  isGPU    = false;
+    bool                                  inactive = false;
+    std::chrono::steady_clock::time_point lastSampleTime = std::chrono::steady_clock::now();
 
     void collectGpuResults(const vko::Device& device)
     {
@@ -252,6 +253,7 @@ public:
           uint64_t begin = it->first.get(device);
           uint64_t end   = it->second.get(device);
           DurationSamples::addSample(end - begin);
+          lastSampleTime = std::chrono::steady_clock::now();
           it = pendingGpuSamples.erase(it);
         }
         else
@@ -265,6 +267,7 @@ public:
     {
       assert(!isGPU); // duplicate name for both CPU and GPU sample
       DurationSamples::addSample(ns);
+      lastSampleTime = std::chrono::steady_clock::now();
     }
 
     void addSample(GpuMeasurement&& sample)
@@ -402,6 +405,26 @@ public:
     Node& node = s.back().makeFrontOrInsert(name);
     node.samples.inactive = false;
     stack().emplace_back(node.children);
+  }
+
+  // Mark a named sample as "considered but not run" this frame, e.g. for
+  // work that's conditionally skipped. This keeps the node's position
+  // stable, without recording a duration sample, so occasionally-skipped
+  // siblings don't reorder relative to each other in the profiler display.
+  void skipped(const std::string& name)
+  {
+    std::lock_guard lock(m_mutex);
+
+    auto& s = stack();
+    if(s.empty() || (s.size() == 1 && std::ranges::any_of(s.front().nodes.get(), [&](const Node& node){ return node.name == name; })))
+    {
+      s.clear();
+      s.emplace_back(threadSamples[std::this_thread::get_id()]);
+    }
+
+    Node& node = s.back().makeFrontOrInsert(name);
+    node.samples.inactive = false;
+    s.back().advance();
   }
 
   template <class SampleType>

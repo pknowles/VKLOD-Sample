@@ -368,13 +368,15 @@ void StreamingSceneVk::geometryLoaderEntrypoint(std::unique_ptr<const Scene> sce
       scene->meshGroupOffsets.back());
   while(m_running)
   {
+    // Note: Due to child events being skipped, this can often show zero
+    // duration, whereas skipped event averages are not affected.
     ScopedCpuTimer timer(m_profiler.get(), "Streaming Loop");
 
     // Fetch streaming requests from the render thread. Wait for them if there
     // is no more streaming work to be done, otherwise process one batch of the
     // remaining work in the queue.
     bool waitForRequests = (m_pendingRequests == 0);
-    m_pipeline0Requests.consume(waitForRequests, [&](streaming::RequestList& requests) {
+    bool didConsume = m_pipeline0Requests.consume(waitForRequests, [&](streaming::RequestList& requests) {
       ScopedCpuTimer timer(m_profiler.get(), "Download Requests");
       ++requestsConsumed;  // delay marking work as done until subsequent work is tracked
       requests.download(m_geometryLoaderContext.device.get(),
@@ -382,6 +384,8 @@ void StreamingSceneVk::geometryLoaderEntrypoint(std::unique_ptr<const Scene> sce
       requestDependenciesPipeline.queueRequests(topLevelGroupRequests);
       m_pendingRequests = requestDependenciesPipeline.pendingRequests();
     });
+    if(!didConsume)
+      m_profiler.get().skipped("Download Requests");  // Avoid UI flicker
 
     // Artificially increment m_workCounter while there is work in the queue.
     // This facilitates StreamingSceneVk::flush() checking for completion.
@@ -417,6 +421,11 @@ void StreamingSceneVk::geometryLoaderEntrypoint(std::unique_ptr<const Scene> sce
           loadGeometryBatch(*scene, requestDependenciesPipeline, out.batch);
         });
       }
+    }
+    else
+    {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      m_profiler.get().skipped("Load Geometry Batch");  // Avoid UI flicker
     }
 
     // Decrement m_workCounter once the queue becomes empty again

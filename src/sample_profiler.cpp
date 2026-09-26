@@ -12,6 +12,9 @@ static std::string formatDurationMs(uint64_t ns)
   return std::format("{:.3f}", static_cast<double>(ns) / 1'000'000.0);
 }
 
+// Grey out the Current column once a node's last real sample is this old.
+static constexpr std::chrono::milliseconds kGreyCurrentTimeout{500};
+
 static void renderNode(const SampleProfiler::Node& node)
 {
   // Skip nodes that have not seen a sample the last frame
@@ -20,6 +23,7 @@ static void renderNode(const SampleProfiler::Node& node)
     return;
 
   const auto stats = node.samples.stats();
+  bool       currentStale = std::chrono::steady_clock::now() - node.samples.lastSampleTime > kGreyCurrentTimeout;
 
   ImGui::TableNextRow();
 
@@ -50,10 +54,9 @@ static void renderNode(const SampleProfiler::Node& node)
   ImGui::TableNextColumn();
   if(stats.sampleCount > 0)
   {
-    if(node.samples.inactive)
+    if(currentStale)
     {
-      ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "%s",
-                         formatDurationMs(stats.currentNs).c_str());
+      ImGui::TextDisabled("%s", formatDurationMs(stats.currentNs).c_str());
     }
     else
     {
@@ -69,7 +72,7 @@ static void renderNode(const SampleProfiler::Node& node)
   ImGui::TableNextColumn();
   if(stats.sampleCount > 0)
   {
-    ImGui::TextDisabled("%s", formatDurationMs(static_cast<uint64_t>(stats.avgNs)).c_str());
+    ImGui::Text("%s", formatDurationMs(static_cast<uint64_t>(stats.avgNs)).c_str());
   }
   else
   {
