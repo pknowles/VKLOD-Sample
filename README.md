@@ -317,6 +317,16 @@ e.g. on the order of a minutes. By default a `rendercache_<mesh.gltf>.dat` cache
 is created in the current working directory so a subsequent launch will be
 faster. The location can be set with `--cache-dir`.
 
+Debug builds enable the Vulkan validation layers by default, which makes
+streaming roughly 40-50x slower. This is per-call overhead rather than a
+validation bug: `ClusterGroupGeometryVk()` in [src/scene.cpp](src/scene.cpp)
+uploads each small per-cluster array through its own temporary staging
+`VkBuffer` (`vkCreateBuffer`, `vkGetBufferMemoryRequirements2`, bind,
+`vkCmdCopyBuffer`, `vkDestroyBuffer`), so every group makes hundreds of tiny
+calls and each one pays the validation cost. Synchronization validation
+(`validate_sync`) is the largest part at about a quarter of it. Launch with
+`--validate 0` to stream at full speed in a debug build.
+
 Two larger scenes based on models from
 [https://threedscans.com/](https://threedscans.com/) are available to play with:
 

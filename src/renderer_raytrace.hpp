@@ -159,6 +159,11 @@ public:
   streaming::StreamingSceneVk&       streaming() { return *m_streaming; }
   const streaming::StreamingSceneVk& streaming() const { return *m_streaming; }
 
+  bool dlssAvailableAndEnabled() const
+  {
+    return m_ngxParameter && m_config->dlssQuality != DlssQuality::Disabled;
+  }
+
   // Default is not safe due to member dependency order
   RaytraceRenderer operator=(RaytraceRenderer&& other) = delete;
 

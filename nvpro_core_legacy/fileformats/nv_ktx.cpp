@@ -23,6 +23,7 @@
 #include <array>
 #include <atomic>
 #include <cassert>  // Some functions produce assertion errors to assist with debugging when NDEBUG is false.
+#include <climits>
 #include <fstream>
 #include <mutex>
 #include <sstream>

@@ -39,7 +39,7 @@
 
 #-------------------------------------------------------------------------------
 # Download the DLSS SDK using standard CMake functions.
-set(DLSS_VERSION "310.4.0" CACHE STRING "DLSS version to download from https://github.com/NVIDIA/DLSS")
+set(DLSS_VERSION "310.9.1" CACHE STRING "DLSS version to download from https://github.com/NVIDIA/DLSS")
 set(_DLSS_URL "https://github.com/NVIDIA/DLSS/archive/refs/tags/v${DLSS_VERSION}.zip")
 set(_DLSS_TARGET_DIR "${CMAKE_BINARY_DIR}/_deps/DLSSRR-${DLSS_VERSION}")
 set(_DLSS_ZIP_FILE "${_DLSS_TARGET_DIR}/DLSS-${DLSS_VERSION}.zip")

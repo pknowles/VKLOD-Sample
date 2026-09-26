@@ -455,8 +455,7 @@ void RaytraceRenderer::render(const RenderParams& params,
                                   staging.commandBuffer().nextSubmitSemaphore()});
       m_dlssRR.reset();
     }
-    if(m_ngxParameter && m_config->dlssQuality != DlssQuality::Disabled
-       && gbufferSize.width >= 32 && gbufferSize.height >= 32)
+    if(dlssAvailableAndEnabled() && gbufferSize.width >= 32 && gbufferSize.height >= 32)
     {
       // Map quality index to NVSDK_NGX_PerfQuality_Value
       NVSDK_NGX_PerfQuality_Value quality;
@@ -539,7 +538,7 @@ void RaytraceRenderer::render(const RenderParams& params,
                                            sceneVk.textureDescriptors, m_rtDescriptorSet);
     m_rtPipeline.writeDescriptorSetFramebuffer(
         *m_gBuffer,
-        (m_config->dlssQuality != DlssQuality::Disabled) ?
+        dlssAvailableAndEnabled() ?
             std::nullopt :
             std::optional{params.framebuffer.renderHdrImageInfo()},
         m_rtDescriptorSet);
@@ -579,7 +578,7 @@ void RaytraceRenderer::render(const RenderParams& params,
       .frame                      = params.common.m_frameAccumIndex++,
       .errorOverDistanceThreshold = errorOverDistanceThreshold,
       .jitter      = halton(int(params.common.m_frameAccumIndex)),
-      .dlssEnabled = (m_config->dlssQuality != DlssQuality::Disabled) ? 1 : 0,
+      .dlssEnabled = dlssAvailableAndEnabled() ? 1 : 0,
   };
 
   // Ray trace
@@ -646,7 +645,7 @@ void RaytraceRenderer::render(const RenderParams& params,
   }
 
   // Blit debug visualization if enabled (works with or without DLSS)
-  if(m_config->showGBufferDebug && m_config->dlssQuality != DlssQuality::Disabled)
+  if(m_config->showGBufferDebug && dlssAvailableAndEnabled())
   {
     blitGBufferDebugVisualization(params.context.device, cmd,
                                   params.framebuffer.renderHdrImage(),
