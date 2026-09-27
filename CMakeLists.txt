@@ -297,6 +297,9 @@ if(MSVC)
         # Mark imgui as external to suppress its warnings
         "/external:I$<SHELL_PATH:${imgui_SOURCE_DIR}>"
 
+        # Mark NVTX as external so static analysis skips its implementation headers
+        "/external:I$<SHELL_PATH:$<TARGET_PROPERTY:nvtx3-cpp,INTERFACE_INCLUDE_DIRECTORIES>>"
+
         # Don't default to buggy parallel builds... like why is this not just on?
         /FS
 
@@ -565,12 +568,13 @@ target_link_libraries(${SAMPLE_EXECUTABLE} nvtx3-cpp)  # adds nvtx3/ include pat
 # Install for packaging
 # TODO: use cpack to combine code with the AppImage path
 set(CMAKE_INSTALL_PREFIX "${CMAKE_BINARY_DIR}/_install" CACHE PATH "Install path prefix")
-install(TARGETS ${SAMPLE_EXECUTABLE} RUNTIME DESTINATION ".")
-install(FILES ${GLSL_FILES} DESTINATION "shaders")
-install(FILES ${NVPRO_CORE_LEGACY_SHADERS} DESTINATION "nvpro_core_legacy/nvvkhl/shaders")
-install(FILES ${DLSS_DLLS} DESTINATION ".")
-install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/doc/icon.png DESTINATION "media")
-install(DIRECTORY "${DOWNLOAD_TARGET_DIR}/bunny_v2" DESTINATION "media")
+install(TARGETS ${SAMPLE_EXECUTABLE} RUNTIME DESTINATION "." COMPONENT Runtime)
+install(FILES ${GLSL_FILES} DESTINATION "shaders" COMPONENT Runtime)
+install(FILES ${NVPRO_CORE_LEGACY_SHADERS} DESTINATION "nvpro_core_legacy/nvvkhl/shaders" COMPONENT Runtime)
+install(FILES ${DLSS_DLLS} DESTINATION "." COMPONENT Runtime)
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/doc/icon.png DESTINATION "media" COMPONENT Runtime)
+install(DIRECTORY "${DOWNLOAD_TARGET_DIR}/bunny_v2" DESTINATION "media" COMPONENT Runtime)
+install(FILES README.md LICENSE DESTINATION "." COMPONENT Runtime)
 
 # Debug in the source directory to avoid having a set of relative shader include
 # paths just for debugging with visual studio

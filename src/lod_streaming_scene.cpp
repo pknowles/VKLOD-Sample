@@ -402,7 +402,7 @@ void StreamingSceneVk::geometryLoaderEntrypoint(std::unique_ptr<const Scene> sce
     // both m_pipeline0Requests or m_pipeline1Geometry.
     if(m_pendingRequests != 0)
     {
-      ScopedCpuTimer timer(m_profiler.get(), "Load Geometry Batch");
+      ScopedCpuTimer batchTimer(m_profiler.get(), "Load Geometry Batch");
       if(m_requiresClas)
       {
         std::ignore = m_pipeline1Geometry.tryProduce([&](LoadUnloadBatch& batch) {

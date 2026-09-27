@@ -310,6 +310,21 @@ cmake --build build --parallel
 
 For **Windows** you may be more comfortable with `cmake-gui`.
 
+### Packaging
+
+For Linux there is a cmake target to make a self-contained executable appimage:
+
+```bash
+cmake --build build --parallel --target appimage
+```
+
+For Windows, a simple `.zip` can be created:
+
+```powershell
+cmake --install build --config Release --component Runtime --prefix build/_install/VKLOD-Sample
+Compress-Archive -Path build/_install/VKLOD-Sample -DestinationPath build/VKLOD-Sample-win64.zip
+```
+
 The bunny model is loaded by default as a quick placeholder. You can click
 **Generate Procedural Scene**, drag/drop your own `.gltf` files over the window
 or launch with `--mesh <mesh.gltf>`. Processing a big scenes can take some time,

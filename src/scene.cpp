@@ -349,7 +349,7 @@ Mesh::Mesh(const CgltfPrimitive& primitive, std::unordered_map<std::u8string, si
   {
     const cgltf_pbr_metallic_roughness& pbr = primitive.material->pbr_metallic_roughness;
     std::ranges::copy(pbr.base_color_factor, glm::value_ptr(material.albedo));
-    auto loadTexture = [&](const cgltf_texture_view& textureView) -> size_t {
+    auto loadTexture = [&](const cgltf_texture_view& textureView) -> int16_t {
       if(textureView.texture)
       {
         const cgltf_image* baseImage = textureView.texture->image;
@@ -360,18 +360,15 @@ Mesh::Mesh(const CgltfPrimitive& primitive, std::unordered_map<std::u8string, si
             std::u8string(reinterpret_cast<const char8_t*>(baseImage->uri));
         auto [index, created] =
             imagesIndex.try_emplace(std::move(uri), imagesIndex.size());
-        return index->second;
+        return static_cast<int16_t>(index->second);
       }
       else
       {
-        return int8_t(-1);
+        return int16_t{-1};
       }
     };
-    using ImageIndexT = decltype(shaders::Material::albedoTexture);
-    material.albedoTexture =
-        static_cast<ImageIndexT>(loadTexture(pbr.base_color_texture));
-    material.metallicRoughnessTexture =
-        static_cast<ImageIndexT>(loadTexture(pbr.metallic_roughness_texture));
+    material.albedoTexture = loadTexture(pbr.base_color_texture);
+    material.metallicRoughnessTexture = loadTexture(pbr.metallic_roughness_texture);
     material.roughness = pbr.roughness_factor;
     material.metallic  = pbr.metallic_factor;
     if(material.albedo == glm::vec4(1.0f))  // filter out unnatural 100% albedo
